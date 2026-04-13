@@ -57,7 +57,7 @@ jobs:
 
       - name: Check for UI component changes
         id: changed-files
-        uses: tj-actions/changed-files@v44
+        uses: tj-actions/changed-files@v46
         with:
           files: |
             src/components/**
