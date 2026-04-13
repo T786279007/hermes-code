@@ -54,18 +54,23 @@ jobs:
     if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
-
-      - name: Check for UI component changes
-        id: changed-files
-        uses: tj-actions/changed-files@v44
         with:
-          files: |
-            src/components/**
-            **/*.tsx
-            **/*.jsx
+          fetch-depth: 0
+
+      - name: Check for UI component changes (no third-party action)
+        id: ui-changes
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E 'src/components/.*\.(tsx|jsx)$' || true)
+          if [ -n "$CHANGED" ]; then
+            echo "ui_changed=true" >> $GITHUB_OUTPUT
+            echo "Changed UI files:"
+            echo "$CHANGED"
+          else
+            echo "ui_changed=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Verify screenshot in PR description
-        if: steps.changed-files.outputs.any_changed == 'true'
+        if: steps.ui-changes.outputs.ui_changed == 'true'
         run: |
           PR_BODY="${{ github.event.pull_request.body }}"
           if echo "$PR_BODY" | grep -qiE "截图|screenshot|image|!\["; then
