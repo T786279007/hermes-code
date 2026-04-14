@@ -79,8 +79,11 @@ class ClaudeRunner:
             Dict with keys: exit_code, stdout, stderr, timed_out, pid, tmux_session.
         """
         env = prepare_runner_env("claude-code", task_id)
+        self._last_worktree = worktree
         # Build command with proper shell quoting
-        cmd = f'claude --permission-mode bypassPermissions -p {shlex.quote(prompt)} --model {model}'
+        log_file = os.path.join(worktree, ".hermes_output.log")
+        raw_cmd = f'claude --permission-mode bypassPermissions -p {shlex.quote(prompt)} --model {model}'
+        cmd = f'{raw_cmd} 2>&1 | tee {shlex.quote(log_file)}'
 
         logger.info("Starting Claude Code in tmux: task=%s model=%s session=%s", task_id, model, session_name)
 
@@ -247,15 +250,27 @@ class ClaudeRunner:
     def _capture_tmux_output(self, session_name: str) -> str:
         """Capture full output from a tmux session.
 
+        Tries reading the tee log file first, then falls back to
+        tmux capture-pane.
+
         Args:
             session_name: tmux session name.
 
         Returns:
             Captured output as string.
         """
+        log_file = os.path.join(
+            self._last_worktree or ".", ".hermes_output.log"
+        )
+        if os.path.isfile(log_file):
+            try:
+                with open(log_file, "r", errors="replace") as f:
+                    return f.read()
+            except Exception:
+                pass
         try:
             result = subprocess.run(
-                ["tmux", "capture-pane", "-t", session_name, "-p", "-S", "-"],
+                ["tmux", "capture-pane", "-t", session_name, "-p", "-e", "-S", "-"],
                 capture_output=True,
                 text=True,
                 timeout=5,
