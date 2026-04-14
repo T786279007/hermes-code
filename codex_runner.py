@@ -36,9 +36,8 @@ class CodexRunner:
         """
         env = prepare_runner_env("codex", task_id)
         cmd = [
-            "codex",
+            "codex", "exec",
             "--dangerously-bypass-approvals-and-sandbox",
-            "--quiet",
             "--model", model,
             prompt,
         ]
