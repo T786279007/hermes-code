@@ -10,10 +10,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import CLAUDE_TIMEOUT, CODEX_TIMEOUT, REPO_PATH, WORKTREE_BASE
+from config import CLAUDE_TIMEOUT, CODEX_TIMEOUT, REPO_PATH, WORKTREE_BASE
 
 if TYPE_CHECKING:
-    from .task_registry import TaskRegistry
+    from task_registry import TaskRegistry
 
 logger = logging.getLogger(__name__)
 

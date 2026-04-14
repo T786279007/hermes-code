@@ -7,7 +7,7 @@ import os
 import stat
 from pathlib import Path
 
-from .config import RUNNER_HOME
+from config import RUNNER_HOME
 
 logger = logging.getLogger(__name__)
 

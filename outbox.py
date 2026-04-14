@@ -9,7 +9,7 @@ import subprocess
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .task_registry import TaskRegistry
+    from task_registry import TaskRegistry
 
 logger = logging.getLogger(__name__)
 
