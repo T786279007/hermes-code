@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
@@ -184,15 +183,31 @@ class TaskExecutor:
                         "to commit your work."
                     )
                 runner = self.claude_runner if agent == "claude-code" else self.codex_runner
-                # Store prompt in registry for traceability
-                self.registry.update_task(task_id, prompt=full_prompt)
-                result = runner.run(
-                    task_id=task_id,
-                    prompt=full_prompt,
-                    worktree=worktree,
-                    model=model,
-                    on_spawn=_on_spawn,
-                )
+
+                # Start runner in background thread to allow progress polling
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        runner.run,
+                        task_id=task_id,
+                        prompt=full_prompt,
+                        worktree=worktree,
+                        model=model,
+                        on_spawn=_on_spawn,
+                    )
+
+                    # Poll progress while waiting for completion
+                    session_name = f"hermes-{task_id}"
+                    while not future.done():
+                        try:
+                            future.result(timeout=5)
+                            break
+                        except concurrent.futures.TimeoutError:
+                            # Timeout is expected - check progress
+                            self._read_progress(task_id, session_name)
+
+                    # Get final result
+                    result = future.result()
             except Exception as e:
                 result = {
                     "exit_code": -1,
@@ -225,7 +240,6 @@ class TaskExecutor:
                     exit_code=exit_code,
                     stderr_tail=stderr_tail,
                     result=result_tail,
-                    done_checks_json=json.dumps(done_checks, default=str),
                 )
                 self.circuit_breaker.record_success(agent)
                 logger.info("Task %s completed successfully", task_id)
@@ -414,6 +428,30 @@ class TaskExecutor:
                     logger.info("Force-removed worktree directory for task %s", task_id)
             except Exception:
                 pass
+
+    def _read_progress(self, task_id: str, session_name: str) -> None:
+        """Read recent progress from tmux session and update registry.
+
+        Args:
+            task_id: Unique task identifier.
+            session_name: tmux session name.
+        """
+        try:
+            result = subprocess.run(
+                ["tmux", "capture-pane", "-t", session_name, "-p"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                # Get last 20 lines
+                lines = result.stdout.strip().split("\n")
+                recent_lines = lines[-20:] if len(lines) > 20 else lines
+                progress_chunk = "\n".join(recent_lines)
+                self.registry.update_progress(task_id, progress_chunk)
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+            # tmux session may not exist or other error - ignore
+            pass
 
 
 def _slugify(text: str) -> str:

@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
     pid INTEGER,
-    done_checks_json TEXT
+    progress_log TEXT
 );
 """
 
@@ -70,6 +70,7 @@ class TaskRegistry:
             conn.executescript(_CREATE_OUTBOX_TABLE)
             conn.execute("PRAGMA journal_mode=WAL;")
             self._ensure_done_checks_column(conn)
+            self._ensure_progress_log_column(conn)
         logger.info("TaskRegistry initialized at %s", self._db_path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -87,14 +88,6 @@ class TaskRegistry:
         conn.execute("PRAGMA busy_timeout=5000;")
         conn.row_factory = sqlite3.Row
         return conn
-
-    def _ensure_done_checks_column(self, conn: sqlite3.Connection) -> None:
-        """Add done_checks_json column for legacy task tables if missing."""
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks);").fetchall()}
-        if "done_checks_json" in cols:
-            return
-        conn.execute("ALTER TABLE tasks ADD COLUMN done_checks_json TEXT;")
-        logger.info("Added missing done_checks_json column to tasks table")
 
     @contextmanager
     def _transaction(self):
@@ -295,19 +288,63 @@ class TaskRegistry:
             logger.info("Task %s finished: status=%s fields=%s", task_id, new_status, list(fields.keys()))
         return updated
 
-    def update_outbox_status(self, task_id: str, action: str, status: str) -> None:
-        """Update outbox entry status (e.g. 'logged' vs 'sent').
+    def _ensure_done_checks_column(self, conn: sqlite3.Connection) -> None:
+        """Add done_checks_json column for legacy task tables if missing."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks);").fetchall()}
+        if "done_checks_json" in cols:
+            return
+        conn.execute("ALTER TABLE tasks ADD COLUMN done_checks_json TEXT;")
+        logger.info("Added missing done_checks_json column to tasks table")
+
+    def _ensure_progress_log_column(self, conn: sqlite3.Connection) -> None:
+        """Add progress_log column if it doesn't exist (auto-migration).
 
         Args:
-            task_id: Task ID.
-            action: Notification action name.
-            status: New status string.
+            conn: SQLite connection.
         """
-        with self._transaction() as conn:
-            conn.execute(
-                "UPDATE outbox SET status = ?, last_error = ? WHERE task_id = ? AND action = ?;",
-                (status, f"status updated to {status}", task_id, action),
-            )
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN progress_log TEXT;")
+            logger.info("Added progress_log column to tasks table")
+        except sqlite3.OperationalError:
+            # Column already exists
+            pass
+
+    def update_progress(self, task_id: str, log_line: str) -> bool:
+        """Append a line to the task's progress log.
+
+        Args:
+            task_id: Unique task identifier.
+            log_line: Line to append to progress log.
+
+        Returns:
+            True if update succeeded.
+        """
+        with self._connect() as conn:
+            row = conn.execute("SELECT progress_log FROM tasks WHERE id = ?;", (task_id,)).fetchone()
+            if row is None:
+                return False
+
+            existing = row["progress_log"] or ""
+            updated = existing + log_line + "\n" if existing else log_line + "\n"
+            conn.execute("UPDATE tasks SET progress_log = ? WHERE id = ?;", (updated, task_id))
+
+        return True
+
+    def get_progress(self, task_id: str) -> str | None:
+        """Get the progress log for a task.
+
+        Args:
+            task_id: Unique task identifier.
+
+        Returns:
+            Progress log string or None if not found.
+        """
+        with self._connect() as conn:
+            row = conn.execute("SELECT progress_log FROM tasks WHERE id = ?;", (task_id,)).fetchone()
+
+        if row is None:
+            return None
+        return row["progress_log"]
 
     def list_tasks(self, status: str | None = None, limit: int = 100) -> list[dict]:
         """List tasks, optionally filtered by status.
