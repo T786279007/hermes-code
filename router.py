@@ -66,11 +66,15 @@ class TaskRouter:
         codex_score = 0
 
         for kw in self.CLAUDE_KEYWORDS:
-            if re.search(re.escape(kw), desc_lower):
+            if re.search(rf'\b{re.escape(kw)}\b', desc_lower) or (
+                any('\u4e00' <= c <= '\u9fff' for c in kw) and re.search(re.escape(kw), desc_lower)
+            ):
                 claude_score += 1
 
         for kw in self.CODEX_KEYWORDS:
-            if re.search(re.escape(kw), desc_lower):
+            if re.search(rf'\b{re.escape(kw)}\b', desc_lower) or (
+                any('\u4e00' <= c <= '\u9fff' for c in kw) and re.search(re.escape(kw), desc_lower)
+            ):
                 codex_score += 1
 
         total = claude_score + codex_score

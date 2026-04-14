@@ -8,8 +8,8 @@ import signal
 import subprocess
 import threading
 
-from .config import CODEX_TIMEOUT
-from .sandbox import prepare_runner_env
+from config import CODEX_TIMEOUT
+from sandbox import prepare_runner_env
 
 logger = logging.getLogger(__name__)
 
