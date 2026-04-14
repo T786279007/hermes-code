@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 
 from config import CLAUDE_TIMEOUT
 from sandbox import prepare_runner_env
@@ -111,7 +112,14 @@ class ClaudeRunner:
         timer.start()
 
         try:
-            proc.wait()
+            # tmux -d returns immediately; wait for the session to close
+            while self._tmux_session_exists(session_name):
+                if timed_out:
+                    break
+                time.sleep(1)
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         except Exception:
             self._kill_tmux(session_name, proc)
         finally:
@@ -224,6 +232,17 @@ class ClaudeRunner:
             task_id, result["exit_code"], timed_out,
         )
         return result
+
+    def _tmux_session_exists(self, session_name: str) -> bool:
+        """Check if a tmux session is still running."""
+        try:
+            result = subprocess.run(
+                ["tmux", "has-session", "-t", session_name],
+                capture_output=True, timeout=5,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def _capture_tmux_output(self, session_name: str) -> str:
         """Capture full output from a tmux session.
