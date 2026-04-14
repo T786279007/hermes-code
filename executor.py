@@ -186,15 +186,15 @@ class TaskExecutor:
 
                 # Start runner in background thread to allow progress polling
                 import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(
-                        runner.run,
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor_pool:
+                    kwargs = dict(
                         task_id=task_id,
                         prompt=full_prompt,
                         worktree=worktree,
                         model=model,
                         on_spawn=_on_spawn,
                     )
+                    future = executor_pool.submit(runner.run, **kwargs)  # type: ignore[arg-type]
 
                     # Poll progress while waiting for completion
                     session_name = f"hermes-{task_id}"
