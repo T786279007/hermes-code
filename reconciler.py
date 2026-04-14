@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from config import CLAUDE_TIMEOUT, CODEX_TIMEOUT, REPO_PATH, WORKTREE_BASE
+from config import CLAUDE_TIMEOUT, CODEX_TIMEOUT, RECONCILER_TIMEOUT, REPO_PATH, WORKTREE_BASE
 
 if TYPE_CHECKING:
     from task_registry import TaskRegistry
@@ -83,7 +83,7 @@ class Reconciler:
                         started_ts = float(started_at)
                     elapsed = now - started_ts
                     # Reconciliation timeout must exceed max runner timeout (W1)
-                    max_runner_timeout = max(CLAUDE_TIMEOUT, CODEX_TIMEOUT) * 2
+                    max_runner_timeout = RECONCILER_TIMEOUT
                     if elapsed > max_runner_timeout:
                         is_dead = True
                         reason = f"Timed out ({elapsed:.0f}s > {max_runner_timeout}s)"

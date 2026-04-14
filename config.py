@@ -16,5 +16,6 @@ RETRY_BASE_DELAY = 10.0
 RETRY_MAX_DELAY = 300.0
 CIRCUIT_BREAKER_THRESHOLD = 3
 CIRCUIT_BREAKER_RESET = 300
+RECONCILER_TIMEOUT = 600  # Reconciler considers tasks dead after this (seconds)
 
 REPO_PATH = "/tmp/hermes-repo"

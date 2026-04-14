@@ -143,6 +143,7 @@ class TestHermesE2E(unittest.TestCase):
         self.patcher_executor_worktree = patch('executor.WORKTREE_BASE', Path(self.worktree_base))
         self.patcher_reconciler_repo = patch('reconciler.REPO_PATH', self.repo_path)
         self.patcher_reconciler_worktree = patch('reconciler.WORKTREE_BASE', Path(self.worktree_base))
+        self.patcher_reconciler_timeout = patch('reconciler.RECONCILER_TIMEOUT', 600)
 
         self.patcher_repo.start()
         self.patcher_worktree.start()
@@ -150,6 +151,7 @@ class TestHermesE2E(unittest.TestCase):
         self.patcher_executor_worktree.start()
         self.patcher_reconciler_repo.start()
         self.patcher_reconciler_worktree.start()
+        self.patcher_reconciler_timeout.start()
 
         # Mock worktree operations
         self.mock_worktrees = {}
@@ -169,6 +171,7 @@ class TestHermesE2E(unittest.TestCase):
         self.patcher_executor_worktree.stop()
         self.patcher_reconciler_repo.stop()
         self.patcher_reconciler_worktree.stop()
+        self.patcher_reconciler_timeout.stop()
         self.patcher_sleep.stop()
         self.patcher_delay.stop()
         shutil.rmtree(self.tmpdir, ignore_errors=True)

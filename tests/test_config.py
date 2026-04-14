@@ -31,10 +31,13 @@ class TestConfigConstants(unittest.TestCase):
         self.assertEqual(config.CLAUDE_TIMEOUT, 300)
 
     def test_codex_timeout(self):
-        self.assertEqual(config.CODEX_TIMEOUT, 180)
+        self.assertEqual(config.CODEX_TIMEOUT, 21600)
 
     def test_max_retries(self):
         self.assertEqual(config.MAX_RETRIES, 3)
+
+    def test_reconciler_timeout(self):
+        self.assertEqual(config.RECONCILER_TIMEOUT, 600)
 
     def test_retry_base_delay(self):
         self.assertEqual(config.RETRY_BASE_DELAY, 10.0)
