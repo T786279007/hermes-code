@@ -25,20 +25,32 @@ def prepare_runner_env(agent: str, task_id: str) -> dict[str, str]:
     runner_home = RUNNER_HOME / agent / task_id
     runner_home.mkdir(parents=True, exist_ok=True)
 
-    # Copy claude auth files into isolated HOME (symlinks would break sandbox isolation)
+    import shutil
+
     real_home = Path.home()
+
+    # Copy claude auth files into isolated HOME (symlinks would break sandbox isolation)
     claude_json = real_home / ".claude.json"
     claude_dir = real_home / ".claude"
     if claude_json.exists():
-        import shutil
         dest = runner_home / ".claude.json"
         shutil.copy2(claude_json, dest)
         dest.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
     if claude_dir.is_dir():
-        import shutil
         dest = runner_home / ".claude"
         if not dest.exists():
             shutil.copytree(claude_dir, dest)
+
+    # Copy codex auth/config into isolated HOME
+    codex_dir = real_home / ".codex"
+    if codex_dir.is_dir():
+        dest = runner_home / ".codex"
+        if not dest.exists():
+            shutil.copytree(codex_dir, dest)
+            # Preserve restrictive permissions on auth.json
+            auth_json = dest / "auth.json"
+            if auth_json.exists():
+                auth_json.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
 
     # Minimal .gitconfig
     gitconfig = runner_home / ".gitconfig"
