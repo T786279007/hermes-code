@@ -17,12 +17,22 @@ logger = logging.getLogger(__name__)
 
 
 def _tmux_available() -> bool:
-    """Check if tmux is available.
+    """Check if tmux is available and functional.
 
     Returns:
-        True if tmux command exists.
+        True if tmux command exists and can actually run.
     """
-    return shutil.which("tmux") is not None
+    tmux_bin = shutil.which("tmux")
+    if not tmux_bin:
+        return False
+    try:
+        result = subprocess.run(
+            [tmux_bin, "list-sessions"],
+            capture_output=True, timeout=5,
+        )
+        return True  # Works even if no sessions (exit 1) — lib errors would be non-zero + stderr
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 class CodexRunner:
