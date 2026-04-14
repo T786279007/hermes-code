@@ -113,6 +113,22 @@ class TaskExecutor:
         description = task["description"]
         branch = task.get("branch", f"hermes/{task_id}")
 
+        # P0-4: Sanitize prompt before execution
+        from prompt_sanitizer import sanitize
+        san_result = sanitize(description)
+        if not san_result.safe:
+            logger.error("Prompt rejected for task %s: %s", task_id, san_result.reason)
+            self.registry.fail_task(
+                task_id, "rejected",
+                failure_class="permanent",
+                stderr_tail=f"Prompt sanitizer: {san_result.reason}",
+            )
+            return self.registry.get_task(task_id)
+        if san_result.warnings:
+            logger.warning("Prompt warnings for %s: %s", task_id, san_result.warnings)
+        # Use sanitized prompt for execution
+        description = san_result.sanitized_prompt
+
         for attempt in range(max_attempts):
             logger.info("Execute attempt %d/%d for task %s", attempt, max_attempts, task_id)
 
