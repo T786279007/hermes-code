@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     started_at TIMESTAMP,
-    pid INTEGER
+    pid INTEGER,
+    done_checks_json TEXT
 );
 """
 
@@ -284,6 +285,20 @@ class TaskRegistry:
         if updated:
             logger.info("Task %s finished: status=%s fields=%s", task_id, new_status, list(fields.keys()))
         return updated
+
+    def update_outbox_status(self, task_id: str, action: str, status: str) -> None:
+        """Update outbox entry status (e.g. 'logged' vs 'sent').
+
+        Args:
+            task_id: Task ID.
+            action: Notification action name.
+            status: New status string.
+        """
+        with self._transaction() as conn:
+            conn.execute(
+                "UPDATE outbox SET status = ?, last_error = ? WHERE task_id = ? AND action = ?;",
+                (status, f"status updated to {status}", task_id, action),
+            )
 
     def list_tasks(self, status: str | None = None, limit: int = 100) -> list[dict]:
         """List tasks, optionally filtered by status.

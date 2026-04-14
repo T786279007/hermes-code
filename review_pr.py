@@ -400,6 +400,16 @@ def post_inline_comment(
             input_text=comment_data
         )
 
+        # If owner/repo not resolved, try relative API path
+        if exit_code != 0:
+            exit_code, output, stderr = _run_command(
+                ["gh", "api",
+                 f"pulls/{pr_number}/comments",
+                 "--input", "-"],
+                cwd=repo_path,
+                input_text=comment_data
+            )
+
         result = json.loads(output)
 
         logger.info(f"Inline comment posted: ID {result.get('id')}")

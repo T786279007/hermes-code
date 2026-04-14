@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
@@ -183,6 +184,8 @@ class TaskExecutor:
                         "to commit your work."
                     )
                 runner = self.claude_runner if agent == "claude-code" else self.codex_runner
+                # Store prompt in registry for traceability
+                self.registry.update_task(task_id, prompt=full_prompt)
                 result = runner.run(
                     task_id=task_id,
                     prompt=full_prompt,
@@ -222,6 +225,7 @@ class TaskExecutor:
                     exit_code=exit_code,
                     stderr_tail=stderr_tail,
                     result=result_tail,
+                    done_checks_json=json.dumps(done_checks, default=str),
                 )
                 self.circuit_breaker.record_success(agent)
                 logger.info("Task %s completed successfully", task_id)

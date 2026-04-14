@@ -18,6 +18,11 @@ class RoutingDecision:
     timeout: int
     confidence: float
     reason: str
+    matched_keywords: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.matched_keywords is None:
+            self.matched_keywords = []
 
 
 class TaskRouter:
@@ -64,18 +69,22 @@ class TaskRouter:
         desc_lower = description.lower()
         claude_score = 0
         codex_score = 0
+        claude_matched: list[str] = []
+        codex_matched: list[str] = []
 
         for kw in self.CLAUDE_KEYWORDS:
             if re.search(rf'\b{re.escape(kw)}\b', desc_lower) or (
                 any('\u4e00' <= c <= '\u9fff' for c in kw) and re.search(re.escape(kw), desc_lower)
             ):
                 claude_score += 1
+                claude_matched.append(kw)
 
         for kw in self.CODEX_KEYWORDS:
             if re.search(rf'\b{re.escape(kw)}\b', desc_lower) or (
                 any('\u4e00' <= c <= '\u9fff' for c in kw) and re.search(re.escape(kw), desc_lower)
             ):
                 codex_score += 1
+                codex_matched.append(kw)
 
         total = claude_score + codex_score
         if total == 0:
@@ -101,6 +110,7 @@ class TaskRouter:
                 timeout=300,
                 confidence=confidence,
                 reason=f"Claude keywords matched {claude_score}/{total}",
+                matched_keywords=claude_matched,
             )
 
         confidence = codex_score / total
@@ -114,4 +124,5 @@ class TaskRouter:
             timeout=180,
             confidence=confidence,
             reason=f"Codex keywords matched {codex_score}/{total}",
+            matched_keywords=codex_matched,
         )

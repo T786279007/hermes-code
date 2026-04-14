@@ -84,11 +84,12 @@ class Outbox:
         try:
             external_id = self._send_feishu(payload)
             with self._registry._transaction() as conn:
+                status = "sent" if external_id != "logged" else "logged"
                 conn.execute(
-                    "UPDATE outbox SET status = 'sent', external_id = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ?;",
-                    (external_id, outbox_id),
+                    "UPDATE outbox SET status = ?, external_id = ?, sent_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                    (status, external_id, outbox_id),
                 )
-            logger.info("Notification sent: task=%s action=%s external_id=%s", task_id, action, external_id)
+            logger.info("Notification %s: task=%s action=%s external_id=%s", status, task_id, action, external_id)
             return external_id
         except Exception as e:
             with self._registry._transaction() as conn:
