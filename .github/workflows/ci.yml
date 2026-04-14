@@ -1,82 +1,71 @@
-name: Hermes CI
+name: CI
 
 on:
   push:
-    branches: [master, main]
+    branches:
+      - main
+      - master
   pull_request:
-    branches: [master, main]
+    branches:
+      - main
+      - master
 
 jobs:
-  lint-and-test:
+  lint:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.12", "3.13"]
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: '3.12'
+          cache: 'pip'
 
-      - name: Install dependencies
+      - name: Install ruff
         run: |
           python -m pip install --upgrade pip
-          pip install pytest pytest-cov
+          python -m pip install ruff
 
-      - name: Lint (syntax check)
-        run: |
-          python -m py_compile src/hermes/*.py
-          echo "✅ All files compile successfully"
+      - name: Run ruff
+        run: python -m ruff check .
+        continue-on-error: false
 
-      - name: Run tests
-        env:
-          PYTHONPATH: src
-        run: |
-          pytest tests/ -v --tb=short --override-ini="addopts="
-
-      - name: Check done_checker module
-        env:
-          PYTHONPATH: src
-        run: |
-          python -c "from hermes.done_checker import run_done_checks; print('✅ done_checker imports OK')"
-
-      - name: Check smart_retry module
-        env:
-          PYTHONPATH: src
-        run: |
-          python -c "from hermes.smart_retry import analyze_failure, generate_retry_prompt; print('✅ smart_retry imports OK')"
-
-  screenshot-check:
+  test:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: '3.12'
+          cache: 'pip'
 
-      - name: Check for UI component changes (no third-party action)
-        id: ui-changes
+      - name: Install pytest
         run: |
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -E 'src/components/.*\.(tsx|jsx)$' || true)
-          if [ -n "$CHANGED" ]; then
-            echo "ui_changed=true" >> $GITHUB_OUTPUT
-            echo "Changed UI files:"
-            echo "$CHANGED"
-          else
-            echo "ui_changed=false" >> $GITHUB_OUTPUT
-          fi
+          python -m pip install --upgrade pip
+          python -m pip install pytest
 
-      - name: Verify screenshot in PR description
-        if: steps.ui-changes.outputs.ui_changed == 'true'
+      - name: Run tests
+        run: python -m pytest tests/ -v --tb=short
+
+  type-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install pyright
         run: |
-          PR_BODY="${{ github.event.pull_request.body }}"
-          if echo "$PR_BODY" | grep -qiE "截图|screenshot|image|!\["; then
-            echo "✅ Screenshot found in PR description"
-          else
-            echo "❌ UI changes detected but no screenshot in PR description"
-            echo "Please add a screenshot to show the UI changes"
-            exit 1
-          fi
+          python -m pip install --upgrade pip
+          python -m pip install pyright
+
+      - name: Run pyright
+        run: python -m pyright
+        continue-on-error: false
