@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_runner import ClaudeRunner
+from claude_runner import ClaudeRunner, _session_name
 from codex_runner import CodexRunner
 from config import REPO_PATH, WORKTREE_BASE
 from retry import CircuitBreaker, classify_failure, compute_delay, FailureClass
@@ -197,14 +198,14 @@ class TaskExecutor:
                     future = executor_pool.submit(runner.run, **kwargs)  # type: ignore[arg-type]
 
                     # Poll progress while waiting for completion
-                    session_name = f"hermes-{task_id}"
+                    safe_session = _session_name(task_id)
                     while not future.done():
                         try:
                             future.result(timeout=5)
                             break
                         except concurrent.futures.TimeoutError:
                             # Timeout is expected - check progress
-                            self._read_progress(task_id, session_name)
+                            self._read_progress(task_id, safe_session)
 
                     # Get final result
                     result = future.result()
@@ -430,28 +431,43 @@ class TaskExecutor:
                 pass
 
     def _read_progress(self, task_id: str, session_name: str) -> None:
-        """Read recent progress from tmux session and update registry.
+        """Read recent progress from tmux session's tee log and update registry.
+
+        Uses the .hermes_output.log file (written by tee) instead of
+        capture-pane, avoiding duplicate content and viewport truncation.
 
         Args:
             task_id: Unique task identifier.
             session_name: tmux session name.
         """
         try:
-            result = subprocess.run(
-                ["tmux", "capture-pane", "-t", session_name, "-p"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                # Get last 20 lines
-                lines = result.stdout.strip().split("\n")
-                recent_lines = lines[-20:] if len(lines) > 20 else lines
-                progress_chunk = "\n".join(recent_lines)
-                self.registry.update_progress(task_id, progress_chunk)
-        except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
-            # tmux session may not exist or other error - ignore
-            pass
+            # Find worktree path from registry
+            task = self.registry.get(task_id)
+            if not task or not task.get("worktree"):
+                return
+            log_file = os.path.join(task["worktree"], ".hermes_output.log")
+            if not os.path.isfile(log_file):
+                return
+
+            # Track last-read offset per task to avoid duplicate appends
+            offset_key = f"_progress_offset:{task_id}"
+            last_offset = getattr(self, offset_key, 0)
+
+            with open(log_file, "r", errors="replace") as f:
+                f.seek(last_offset)
+                new_content = f.read()
+
+            if not new_content.strip():
+                return
+
+            # Only append the new delta, not the entire file
+            progress_chunk = new_content.rstrip("\n")
+            self.registry.update_progress(task_id, progress_chunk)
+
+            # Update offset for next poll
+            setattr(self, offset_key, last_offset + len(new_content))
+        except Exception:
+            logger.debug("Progress read failed for %s", task_id, exc_info=True)
 
 
 def _slugify(text: str) -> str:

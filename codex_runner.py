@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -15,6 +16,23 @@ from config import CODEX_TIMEOUT
 from sandbox import prepare_runner_env
 
 logger = logging.getLogger(__name__)
+
+# Characters unsafe in tmux target syntax (session:window.pane)
+_TMUX_SAFE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _session_name(task_id: str) -> str:
+    """Sanitize task_id for use as a tmux session name.
+
+    Args:
+        task_id: Raw task identifier.
+
+    Returns:
+        Safe tmux session name.
+    """
+    safe = _TMUX_SAFE.sub("_", task_id).strip("_")
+    safe = safe[:64] or "task"
+    return f"hermes-{safe}"
 
 
 def _tmux_available() -> bool:
@@ -57,10 +75,13 @@ class CodexRunner:
             Dict with keys: exit_code, stdout, stderr, timed_out, pid, tmux_session (if using tmux).
         """
         use_tmux = _tmux_available()
-        session_name: str | None = f"hermes-{task_id}" if use_tmux else None
 
-        if use_tmux and session_name is not None:
-            return self._run_with_tmux(task_id, prompt, worktree, model, reasoning, on_spawn, session_name)
+        if use_tmux:
+            try:
+                return self._run_with_tmux(task_id, prompt, worktree, model, reasoning, on_spawn, _session_name(task_id))
+            except (OSError, subprocess.SubprocessError) as e:
+                logger.warning("tmux path failed for %s, falling back to legacy: %s", task_id, e, exc_info=True)
+                return self._run_legacy(task_id, prompt, worktree, model, reasoning, on_spawn)
         else:
             return self._run_legacy(task_id, prompt, worktree, model, reasoning, on_spawn)
 

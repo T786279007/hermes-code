@@ -310,7 +310,7 @@ class TaskRegistry:
             pass
 
     def update_progress(self, task_id: str, log_line: str) -> bool:
-        """Append a line to the task's progress log.
+        """Append a line to the task's progress log (atomic SQL).
 
         Args:
             task_id: Unique task identifier.
@@ -320,15 +320,16 @@ class TaskRegistry:
             True if update succeeded.
         """
         with self._connect() as conn:
-            row = conn.execute("SELECT progress_log FROM tasks WHERE id = ?;", (task_id,)).fetchone()
-            if row is None:
-                return False
-
-            existing = row["progress_log"] or ""
-            updated = existing + log_line + "\n" if existing else log_line + "\n"
-            conn.execute("UPDATE tasks SET progress_log = ? WHERE id = ?;", (updated, task_id))
-
-        return True
+            cursor = conn.execute(
+                """
+                UPDATE tasks
+                SET progress_log = COALESCE(progress_log, '') || ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?;
+                """,
+                (log_line + "\n", task_id),
+            )
+            return cursor.rowcount > 0
 
     def get_progress(self, task_id: str) -> str | None:
         """Get the progress log for a task.
