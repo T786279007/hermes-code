@@ -27,7 +27,7 @@ def _tmux_available() -> bool:
     if not tmux_bin:
         return False
     try:
-        result = subprocess.run(
+        subprocess.run(
             [tmux_bin, "list-sessions"],
             capture_output=True, timeout=5,
         )
@@ -57,9 +57,9 @@ class CodexRunner:
             Dict with keys: exit_code, stdout, stderr, timed_out, pid, tmux_session (if using tmux).
         """
         use_tmux = _tmux_available()
-        session_name = f"hermes-{task_id}" if use_tmux else None
+        session_name: str | None = f"hermes-{task_id}" if use_tmux else None
 
-        if use_tmux:
+        if use_tmux and session_name is not None:
             return self._run_with_tmux(task_id, prompt, worktree, model, reasoning, on_spawn, session_name)
         else:
             return self._run_legacy(task_id, prompt, worktree, model, reasoning, on_spawn)
