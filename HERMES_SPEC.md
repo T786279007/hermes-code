@@ -35,7 +35,7 @@
 - GitHub token: 从环境变量 `$HERMES_GITHUB_TOKEN` 读取
 - Claude Code 参数: `--permission-mode bypassPermissions --print`
 - Codex 参数: `--dangerously-bypass-approvals-and-sandbox --quiet`
-- Claude Code 超时: 300s, Codex 超时: 180s
+- Claude Code 超时: 300s, Codex 超时: 21600s（6h）
 
 ## 审查 Blocker 修复清单（必须全部落实）
 
@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     branch TEXT,                            -- git worktree 分支名
     worktree TEXT,                          -- worktree 绝对路径
     prompt TEXT,                            -- 送给 Agent 的完整 prompt
+    done_checks_json TEXT,                  -- JSON 化的完成状态（PR/CI/审查等）
     result TEXT,                            -- Agent 输出摘要（最后 2KB）
     model TEXT,                             -- 使用的模型名
     exit_code INTEGER,
@@ -109,12 +110,13 @@ LOG_DIR = Path("/home/txs/hermes/logs")
 PROXY = "http://127.0.0.1:7897"
 
 CLAUDE_TIMEOUT = 300
-CODEX_TIMEOUT = 180
+CODEX_TIMEOUT = 21600  # Codex 任务最长 6 小时
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 10.0
 RETRY_MAX_DELAY = 300.0
 CIRCUIT_BREAKER_THRESHOLD = 3
 CIRCUIT_BREAKER_RESET = 300
+RECONCILER_TIMEOUT = 600  # fallback 超时，用于未识别 agent 或未知最长运行期
 
 REPO_PATH = "/tmp/hermes-repo"  # 目标 git repo（后续可配）
 ```
@@ -284,7 +286,7 @@ class Reconciler:
         2. 检查 PID 是否存活（os.kill(pid, 0)）
         3. 检查 worktree 目录是否存在
         4. 检查 branch 是否存在（修 W8: cwd=repo_path）
-        5. 超时检查（用 started_at，修 B2）
+        5. 超时检查（用 started_at，针对 Claude/Codex 使用各自超时，缺 agent 时退到 RECONCILER_TIMEOUT）
         6. 清理孤儿 worktree
         
         返回 {fixed: [...], orphaned: [...]}
@@ -348,6 +350,7 @@ class HealthChecker:
             "agents": {task_id: {pid, alive, elapsed_sec}},
             "database": {integrity, wal_checkpoint},
         }
+        每个 agent 的 `elapsed_sec` 由 agent 所属超时（Claude/Codex 自己的 timeout，不知模型时退到 RECONCILER_TIMEOUT）计算，用以驱动 stale/needs_attention 决策。
         """
 ```
 

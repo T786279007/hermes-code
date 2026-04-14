@@ -82,8 +82,7 @@ class Reconciler:
                     else:
                         started_ts = float(started_at)
                     elapsed = now - started_ts
-                    # Reconciliation timeout must exceed max runner timeout (W1)
-                    max_runner_timeout = RECONCILER_TIMEOUT
+                    max_runner_timeout = self._task_timeout(task)
                     if elapsed > max_runner_timeout:
                         is_dead = True
                         reason = f"Timed out ({elapsed:.0f}s > {max_runner_timeout}s)"
@@ -160,6 +159,19 @@ class Reconciler:
 
         logger.info("Reconciliation complete: fixed=%d orphaned=%d", len(fixed), len(orphaned))
         return {"fixed": fixed, "orphaned": orphaned}
+
+    def _task_timeout(self, task: dict) -> int:
+        """Return the reconciliation timeout for a task.
+
+        Claude tasks should be recovered quickly once they exceed their expected
+        runtime, while Codex tasks may legitimately run much longer.
+        """
+        agent = task.get("agent")
+        if agent == "claude-code":
+            return CLAUDE_TIMEOUT * 2
+        if agent == "codex":
+            return CODEX_TIMEOUT * 2
+        return RECONCILER_TIMEOUT
 
     def _cleanup_worktree(self, worktree: str) -> None:
         """Remove a worktree directory.

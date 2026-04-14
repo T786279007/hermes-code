@@ -62,6 +62,7 @@ result = post_inline_comment(
     line_number=78
 )
 ```
+If the primary `gh api repos/{owner}/{repo}/pulls/<n>/comments` call raises `CLIError`, the module now logs the error and retries the relative `pulls/<n>/comments` endpoint so inline comments still land even when repository metadata is unavailable.
 
 ### 4. **get_review_status()** - Get PR review status
 ```python

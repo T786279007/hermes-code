@@ -360,6 +360,28 @@ class TestPostInlineComment(unittest.TestCase):
 
         self.assertIn("parse", str(context.exception).lower())
 
+    @patch('review_pr._run_command')
+    def test_post_inline_comment_fallback(self, mock_run):
+        """Test that fallback path executes when primary call fails."""
+        mock_run.side_effect = [
+            CLIError("repos endpoint failed"),
+            (
+                0,
+                json.dumps({"id": 987, "html_url": "https://github.com/repo/pull/1/comment/987"}),
+                ""
+            )
+        ]
+
+        result = post_inline_comment("/path", 1, "Fallback comment", "file.py", 10)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["comment_id"], "987")
+        self.assertEqual(mock_run.call_count, 2)
+        first_call_args = mock_run.call_args_list[0][0][0]
+        second_call_args = mock_run.call_args_list[1][0][0]
+        self.assertIn("repos/{owner}/{repo}", first_call_args[2])
+        self.assertIn("pulls/1/comments", second_call_args[2])
+
 
 class TestGetReviewStatus(unittest.TestCase):
     """Tests for get_review_status function."""

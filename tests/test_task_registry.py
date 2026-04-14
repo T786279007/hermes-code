@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -196,6 +197,72 @@ class TestTransitionStatus(BaseRegistryTest):
         self.registry.transition_status("t1", "failed")
         task = self.registry.get_task("t1")
         self.assertIsNone(task.get("started_at"))
+
+
+class TestLegacyMigration(unittest.TestCase):
+    """Ensure TaskRegistry adds done_checks_json column when missing."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self.tmpdir, "legacy.db")
+        self._create_legacy_schema()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _create_legacy_schema(self):
+        legacy_schema = """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            branch TEXT,
+            worktree TEXT,
+            prompt TEXT,
+            result TEXT,
+            model TEXT,
+            exit_code INTEGER,
+            stderr_tail TEXT,
+            failure_class TEXT,
+            attempt INTEGER DEFAULT 0,
+            max_attempts INTEGER DEFAULT 3,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            started_at TIMESTAMP,
+            pid INTEGER
+        );
+        CREATE TABLE outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            external_id TEXT,
+            payload TEXT,
+            status TEXT DEFAULT 'pending',
+            attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            sent_at TIMESTAMP,
+            last_error TEXT,
+            UNIQUE(task_id, action)
+        );
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(legacy_schema)
+        conn.close()
+
+    def test_migrates_done_checks_column(self):
+        TaskRegistry(self.db_path)
+        with sqlite3.connect(self.db_path) as conn:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks);").fetchall()}
+        self.assertIn("done_checks_json", cols)
+
+    def test_finish_task_accepts_done_checks(self):
+        registry = TaskRegistry(self.db_path)
+        task = registry.create_task("t-mig", "migration", "claude-code")
+        done = registry.finish_task(task["id"], "done", done_checks_json='{"checks": []}')
+        self.assertTrue(done)
+        stored = registry.get_task(task["id"])
+        self.assertEqual(stored["done_checks_json"], '{"checks": []}')
 
 
 class TestFinishTask(BaseRegistryTest):

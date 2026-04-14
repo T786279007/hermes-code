@@ -69,6 +69,7 @@ class TaskRegistry:
             conn.executescript(_CREATE_TASKS_TABLE)
             conn.executescript(_CREATE_OUTBOX_TABLE)
             conn.execute("PRAGMA journal_mode=WAL;")
+            self._ensure_done_checks_column(conn)
         logger.info("TaskRegistry initialized at %s", self._db_path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -86,6 +87,14 @@ class TaskRegistry:
         conn.execute("PRAGMA busy_timeout=5000;")
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _ensure_done_checks_column(self, conn: sqlite3.Connection) -> None:
+        """Add done_checks_json column for legacy task tables if missing."""
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks);").fetchall()}
+        if "done_checks_json" in cols:
+            return
+        conn.execute("ALTER TABLE tasks ADD COLUMN done_checks_json TEXT;")
+        logger.info("Added missing done_checks_json column to tasks table")
 
     @contextmanager
     def _transaction(self):

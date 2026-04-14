@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
@@ -170,6 +171,37 @@ class TestCheckAll(BaseHealthCheckTest):
     def test_check_database_is_dict(self):
         result = self.checker.check()
         self.assertIsInstance(result["database"], dict)
+
+
+class TestStaleDetection(BaseHealthCheckTest):
+    """Per-agent stale timeout tests."""
+
+    def test_claude_task_becomes_stale(self):
+        self.registry.create_task("claude-stale", "d1", "claude-code")
+        self.registry.transition_status("claude-stale", "running", "pending")
+        old = datetime.now(timezone.utc) - timedelta(seconds=1200)
+        with self.registry._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?;",
+                (old.strftime("%Y-%m-%d %H:%M:%S"), "claude-stale"),
+            )
+
+        result = self.checker._check_stale()
+        self.assertEqual(len(result["stale_tasks"]), 1)
+        self.assertEqual(result["stale_tasks"][0]["task_id"], "claude-stale")
+
+    def test_codex_task_not_stale_at_20_minutes(self):
+        self.registry.create_task("codex-long", "d1", "codex")
+        self.registry.transition_status("codex-long", "running", "pending")
+        old = datetime.now(timezone.utc) - timedelta(seconds=1200)
+        with self.registry._connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET started_at = ? WHERE id = ?;",
+                (old.strftime("%Y-%m-%d %H:%M:%S"), "codex-long"),
+            )
+
+        result = self.checker._check_stale()
+        self.assertEqual(result["stale_tasks"], [])
 
 
 if __name__ == "__main__":

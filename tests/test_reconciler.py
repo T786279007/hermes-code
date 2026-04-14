@@ -109,6 +109,25 @@ class TestReconcileTimeout(BaseReconcilerTest):
             self.assertEqual(task["status"], "failed")
             self.assertIn("Timed out", task["stderr_tail"])
 
+    def test_codex_task_not_recovered_before_codex_timeout(self):
+        """Long-running Codex task should not be treated like a short Claude task."""
+        with patch("reconciler.REPO_PATH", self.repo_path), \
+             patch("reconciler.WORKTREE_BASE", Path(self.worktree_base)):
+            self.registry.create_task("t-codex", "desc", "codex")
+            self.registry.transition_status("t-codex", "running", "pending")
+
+            past = datetime.now(timezone.utc) - timedelta(seconds=1200)
+            with self.registry._connect() as conn:
+                conn.execute(
+                    "UPDATE tasks SET started_at = ? WHERE id = ?;",
+                    (past.strftime("%Y-%m-%d %H:%M:%S"), "t-codex"),
+                )
+
+            result = self.reconciler.reconcile()
+            self.assertNotIn("t-codex", result["fixed"])
+            task = self.registry.get_task("t-codex")
+            self.assertEqual(task["status"], "running")
+
 
 class TestReconcileWorktree(BaseReconcilerTest):
     """Worktree-related recovery tests."""

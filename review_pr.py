@@ -392,16 +392,20 @@ def post_inline_comment(
             "line": line_number
         })
 
-        exit_code, output, stderr = _run_command(
-            ["gh", "api",
-             f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments",
-             "--input", "-"],
-            cwd=repo_path,
-            input_text=comment_data
-        )
+        try:
+            exit_code, output, stderr = _run_command(
+                ["gh", "api",
+                 f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments",
+                 "--input", "-"],
+                cwd=repo_path,
+                input_text=comment_data
+            )
+        except CLIError as primary_error:
+            logger.warning(
+                "Primary inline comment endpoint failed, falling back to relative path: %s",
+                primary_error
+            )
 
-        # If owner/repo not resolved, try relative API path
-        if exit_code != 0:
             exit_code, output, stderr = _run_command(
                 ["gh", "api",
                  f"pulls/{pr_number}/comments",

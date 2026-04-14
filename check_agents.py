@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from config import CLAUDE_TIMEOUT, CODEX_TIMEOUT, RECONCILER_TIMEOUT
+
 if TYPE_CHECKING:
     from task_registry import TaskRegistry
 
@@ -134,8 +136,6 @@ class HealthChecker:
         Returns:
             Dict with stale_tasks list.
         """
-        from config import RECONCILER_TIMEOUT
-
         running = self._registry.list_tasks(status="running")
         now = time.time()
         stale_tasks: list[dict] = []
@@ -151,11 +151,13 @@ class HealthChecker:
                 else:
                     started_ts = float(started_at)
                 elapsed = now - started_ts
-                if elapsed > RECONCILER_TIMEOUT:
+                threshold = self._task_timeout(task)
+                if elapsed > threshold:
                     stale_tasks.append({
                         "task_id": task["id"],
                         "elapsed_sec": round(elapsed, 1),
                         "pid": task.get("pid"),
+                        "threshold_sec": threshold,
                     })
             except (ValueError, TypeError):
                 pass
@@ -201,3 +203,12 @@ class HealthChecker:
 
         logger.info("PR check: %d open PRs, CI failed=%s", len(open_prs), has_failed_ci)
         return {"open_prs": open_prs, "has_failed_ci": has_failed_ci}
+
+    def _task_timeout(self, task: dict) -> int:
+        """Return the stale threshold that matches reconciler behavior."""
+        agent = task.get("agent")
+        if agent == "claude-code":
+            return CLAUDE_TIMEOUT * 2
+        if agent == "codex":
+            return CODEX_TIMEOUT * 2
+        return RECONCILER_TIMEOUT
