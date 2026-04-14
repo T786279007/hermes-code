@@ -257,7 +257,7 @@ Suggestion: Fix recommendation
         # Run Claude Code review
         logger.info("Running Claude Code review...")
         exit_code, claude_output, claude_err = _run_command(
-            ["claude", "--print", "--output-format", "stream-json"],
+            ["claude", "--print", "--output-format", "stream-json", "--verbose"],
             cwd=repo_path,
             input_text=review_prompt + diff_output
         )
@@ -573,7 +573,7 @@ Suggestion: Fix recommendation
         logger.info("Running Codex review...")
         exit_code, codex_output, codex_err = _run_command(
             ["codex", "--dangerously-bypass-approvals-and-sandbox",
-             "--quiet", "--model", model],
+             "--model", model],
             cwd=repo_path,
             input_text=review_prompt + diff_output
         )
