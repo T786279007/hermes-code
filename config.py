@@ -7,7 +7,7 @@ WORKTREE_BASE = HERMES_HOME / "worktrees"
 DB_PATH = HERMES_HOME / "tasks.db"
 RUNNER_HOME = HERMES_HOME / "runner_home"
 LOG_DIR = Path("/home/txs/hermes/logs")
-PROXY = "http://127.0.0.1:7897"
+PROXY = "http://127.0.0.1:7899"
 
 CLAUDE_TIMEOUT = 300
 CODEX_TIMEOUT = 21600

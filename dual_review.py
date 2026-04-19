@@ -201,19 +201,22 @@ def _merge_issues(
     """
     merged: List[Dict[str, Any]] = []
     used_codex: set = set()
+
+    # Build O(1) lookup index for codex issues by (file_path, line_number)
+    codex_index: Dict[tuple, int] = {}
+    for idx, coi in enumerate(codex_issues):
+        key = (coi.get("file_path"), coi.get("line_number"))
+        if key[0] and key[1]:
+            codex_index[key] = idx
     consensus_count = 0
 
     for ci in claude_issues:
-        # Try to find a matching Codex issue at the same file+line
+        # Try to find a matching Codex issue at the same file+line (O(1) via index)
         match_idx = None
         if ci.get("file_path") and ci.get("line_number"):
-            for idx, coi in enumerate(codex_issues):
-                if idx in used_codex:
-                    continue
-                if (coi.get("file_path") == ci.get("file_path")
-                        and coi.get("line_number") == ci.get("line_number")):
-                    match_idx = idx
-                    break
+            key = (ci.get("file_path"), ci.get("line_number"))
+            if key in codex_index and codex_index[key] not in used_codex:
+                match_idx = codex_index[key]
 
         if match_idx is not None:
             coi = codex_issues[match_idx]

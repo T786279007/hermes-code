@@ -31,7 +31,7 @@
 - Python: 3.12+
 - Claude Code CLI: v2.1.x, 命令 `claude`
 - Codex CLI: v0.120.x, 命令 `codex`
-- 代理: `http://127.0.0.1:7897`
+- 代理: `http://127.0.0.1:7899`
 - GitHub token: 从环境变量 `$HERMES_GITHUB_TOKEN` 读取
 - Claude Code 参数: `--permission-mode bypassPermissions --print`
 - Codex 参数: `--dangerously-bypass-approvals-and-sandbox --quiet`
@@ -107,7 +107,7 @@ WORKTREE_BASE = HERMES_HOME / "worktrees"
 DB_PATH = HERMES_HOME / "tasks.db"
 RUNNER_HOME = HERMES_HOME / "runner_home"
 LOG_DIR = Path("/home/txs/hermes/logs")
-PROXY = "http://127.0.0.1:7897"
+PROXY = "http://127.0.0.1:7899"
 
 CLAUDE_TIMEOUT = 300
 CODEX_TIMEOUT = 21600  # Codex 任务最长 6 小时

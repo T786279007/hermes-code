@@ -196,7 +196,7 @@ PYTHONPATH=/home/txs pytest tests/test_router.py -v    # 单模块
 | `CIRCUIT_BREAKER_RESET` | `300` | 熔断器冷却时间（秒） |
 | `REPO_PATH` | `/tmp/hermes-repo` | Git 仓库路径 |
 | `DB_PATH` | `hermes-agent/tasks.db` | SQLite 数据库路径 |
-| `PROXY` | `http://127.0.0.1:7897` | HTTP 代理 |
+| `PROXY` | `http://127.0.0.1:7899` | HTTP 代理 |
 
 ## 🛡️ 安全
 
@@ -242,6 +242,41 @@ PYTHONPATH=/home/txs pytest tests/test_router.py -v    # 单模块
 - 智能重试 + 熔断器
 - Reconciler 崩溃恢复
 - 幂等通知
+
+
+## 🌍 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `HERMES_GITHUB_TOKEN` | (无) | GitHub Token，用于 PR 创建和代码审查 |
+| `PYTHONPATH` | (无) | 需设置为 hermes 父目录（如 `/home/txs`） |
+| `http_proxy` / `https_proxy` | (无) | HTTP 代理，Claude Code/Codex 访问 GitHub 时需要 |
+
+## ❓ 故障排查 FAQ
+
+### Q: 测试报 `ModuleNotFoundError`
+A: 确保设置了 `PYTHONPATH`：`PYTHONPATH=/home/txs pytest tests/ -v`
+
+### Q: Claude Code / Codex 执行超时
+A: 调整 `config.py` 中的超时值（`CLAUDE_TIMEOUT` / `CODEX_TIMEOUT`）
+
+### Q: Git push 被拒
+A: 检查 `HERMES_GITHUB_TOKEN` 是否设置且有效
+
+### Q: Dashboard 无法连接数据库
+A: 确保 `hermes-agent/tasks.db` 存在且可读
+
+## 🔄 自举开发
+
+Hermes 的部分核心模块是由自己调度 Claude Code 生成的：
+
+| 模块 | 说明 |
+|------|------|
+| `pr_manager.py` | PR 创建/列表/合并/CI 状态检查 |
+| `review_pr.py` | AI 代码审查 + GitHub 评论 + 自动审批 |
+| `workflow_engine.py` | 管道/并行/依赖/重试/持久化工作流 |
+
+这就是「AI 管理 AI」的核心价值——Hermes 不仅能调度 Agent 完成用户任务，还能自我改进。
 
 ## 📄 License
 

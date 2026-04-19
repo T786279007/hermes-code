@@ -17,7 +17,8 @@ import argparse
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_PATH = "/home/txs/hermes-agent/tasks.db"
+from config import DB_PATH as _DB_PATH
+DB_PATH = str(_DB_PATH)
 WORKTREE_BASE = "/home/txs/hermes-agent/worktrees"
 HERMES_ROOT = "/home/txs/hermes"
 

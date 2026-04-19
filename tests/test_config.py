@@ -3,7 +3,7 @@
 
 import unittest
 from pathlib import Path
-import config
+from hermes import config
 
 
 class TestConfigConstants(unittest.TestCase):
@@ -25,7 +25,7 @@ class TestConfigConstants(unittest.TestCase):
         self.assertEqual(config.LOG_DIR, Path("/home/txs/hermes/logs"))
 
     def test_proxy(self):
-        self.assertEqual(config.PROXY, "http://127.0.0.1:7897")
+        self.assertEqual(config.PROXY, "http://127.0.0.1:7899")
 
     def test_claude_timeout(self):
         self.assertEqual(config.CLAUDE_TIMEOUT, 300)

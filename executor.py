@@ -16,6 +16,7 @@ from config import REPO_PATH, WORKTREE_BASE
 from retry import CircuitBreaker, classify_failure, compute_delay, FailureClass
 from sandbox import cleanup_runner_env
 from done_checker import run_done_checks
+from prompt_sanitizer import sanitize
 from smart_retry import generate_retry_prompt
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,6 @@ class TaskExecutor:
         branch = task.get("branch", f"hermes/{task_id}")
 
         # P0-4: Sanitize prompt before execution
-        from prompt_sanitizer import sanitize
         san_result = sanitize(description)
         if not san_result.safe:
             logger.error("Prompt rejected for task %s: %s", task_id, san_result.reason)
@@ -458,7 +458,7 @@ class TaskExecutor:
         """
         try:
             # Find worktree path from registry
-            task = self.registry.get(task_id)
+            task = self.registry.get_task(task_id)
             if not task or not task.get("worktree"):
                 return
             log_file = os.path.join(task["worktree"], ".hermes_output.log")
