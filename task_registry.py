@@ -50,6 +50,44 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 """
 
+_CREATE_EXECUTION_LOGS_TABLE = """
+CREATE TABLE IF NOT EXISTS execution_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    level TEXT DEFAULT 'info',
+    source TEXT,
+    message TEXT NOT NULL,
+    metadata TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+"""
+
+_CREATE_COMMAND_QUEUE_TABLE = """
+CREATE TABLE IF NOT EXISTS command_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    payload TEXT,
+    status TEXT DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    delivered_at TIMESTAMP,
+    executed_at TIMESTAMP,
+    result TEXT,
+    FOREIGN KEY (task_id) REFERENCES tasks(id)
+);
+"""
+
+_CREATE_WEB_SESSIONS_TABLE = """
+CREATE TABLE IF NOT EXISTS web_sessions (
+    id TEXT PRIMARY KEY,
+    api_key TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_accessed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP
+);
+"""
+
 
 class TaskRegistry:
     """Thread-safe SQLite task registry with WAL mode."""
@@ -68,9 +106,14 @@ class TaskRegistry:
         with self._connect() as conn:
             conn.executescript(_CREATE_TASKS_TABLE)
             conn.executescript(_CREATE_OUTBOX_TABLE)
+            conn.executescript(_CREATE_EXECUTION_LOGS_TABLE)
+            conn.executescript(_CREATE_COMMAND_QUEUE_TABLE)
+            conn.executescript(_CREATE_WEB_SESSIONS_TABLE)
             conn.execute("PRAGMA journal_mode=WAL;")
             self._ensure_done_checks_column(conn)
             self._ensure_progress_log_column(conn)
+            self._ensure_web_columns(conn)
+            self._ensure_log_indexes(conn)
         logger.info("TaskRegistry initialized at %s", self._db_path)
 
     def _connect(self) -> sqlite3.Connection:
@@ -307,6 +350,39 @@ class TaskRegistry:
             logger.info("Added progress_log column to tasks table")
         except sqlite3.OperationalError:
             # Column already exists
+            pass
+
+    def _ensure_web_columns(self, conn: sqlite3.Connection) -> None:
+        """Add web-related columns to tasks table (auto-migration).
+
+        Args:
+            conn: SQLite connection.
+        """
+        for col in ("feishu_thread_id TEXT", "feishu_message_id TEXT",
+                     "web_submitted INTEGER DEFAULT 0", "cmd_count INTEGER DEFAULT 0"):
+            col_name = col.split()[0]
+            try:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {col};")
+                logger.info("Added %s column to tasks table", col_name)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+    def _ensure_log_indexes(self, conn: sqlite3.Connection) -> None:
+        """Create indexes on execution_logs if they don't exist.
+
+        Args:
+            conn: SQLite connection.
+        """
+        try:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_logs_task_created "
+                "ON execution_logs(task_id, created_at);"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cmd_queue_task_status "
+                "ON command_queue(task_id, status);"
+            )
+        except sqlite3.OperationalError:
             pass
 
     def update_progress(self, task_id: str, log_line: str) -> bool:

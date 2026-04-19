@@ -18,6 +18,8 @@ from sandbox import cleanup_runner_env
 from done_checker import run_done_checks
 from prompt_sanitizer import sanitize
 from smart_retry import generate_retry_prompt
+from execution_log import ExecutionLog
+from command_queue import CommandQueue
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,8 @@ class TaskExecutor:
         self.claude_runner = ClaudeRunner()
         self.codex_runner = CodexRunner()
         self.circuit_breaker = CircuitBreaker()
+        self.exec_log = ExecutionLog(self.registry)
+        self.cmd_queue = CommandQueue(self.registry)
 
     def submit(self, description: str, override: str | None = None) -> dict:
         """Submit a new task and block until it completes.
@@ -75,6 +79,7 @@ class TaskExecutor:
             branch=branch,
             model=decision.model,
         )
+        self.exec_log.append(task_id, f"Task submitted: agent={agent} model={decision.model}", source="system")
 
         # 4. Execute (blocking)
         task = self.execute(task_id)
@@ -161,6 +166,8 @@ class TaskExecutor:
                     logger.error("Task %s not in pending state, aborting", task_id)
                     break
 
+            self.exec_log.append(task_id, f"Execution started (attempt {attempt+1}/{max_attempts})", source="system")
+
             # 3. Create worktree (one per task, reused across retries)
             try:
                 worktree = self._create_worktree(task_id, branch)
@@ -222,6 +229,17 @@ class TaskExecutor:
                         except concurrent.futures.TimeoutError:
                             # Timeout is expected - check progress
                             self._read_progress(task_id, safe_session)
+                            # Check for pending commands
+                            if self.cmd_queue.has_pending(task_id):
+                                commands = self.cmd_queue.consume(task_id)
+                                for cmd in commands:
+                                    self.exec_log.append(
+                                        task_id,
+                                        f"Command received: {cmd['command']}" + (f" — {cmd.get('payload','')}" if cmd.get('payload') else ""),
+                                        source="user",
+                                        level="info",
+                                    )
+                                    self.cmd_queue.mark_executed(cmd["id"], "acknowledged")
 
                     # Get final result
                     result = future.result()
@@ -260,6 +278,7 @@ class TaskExecutor:
                 )
                 self.circuit_breaker.record_success(agent)
                 logger.info("Task %s completed successfully", task_id)
+                self.exec_log.append(task_id, "Task completed successfully", source="system", level="info")
                 break
             else:
                 # W10: use runner's failure_class if provided, else classify from stderr
@@ -306,6 +325,10 @@ class TaskExecutor:
                         attempt=attempt,
                     )
                     logger.error("Task %s failed after %d attempts", task_id, max_attempts)
+                    self.exec_log.append(
+                        task_id, f"Task failed after {max_attempts} attempts: {stderr_tail[:200]}",
+                        source="system", level="error",
+                    )
                     break
 
         # Re-read final state from registry (task dict may be stale after loop)
