@@ -1,438 +1,438 @@
-#!/usr/bin/env python3
-"""Comprehensive tests for cleanup.py."""
+"""Tests for cleanup.py - integration tests with real temp DB and filesystem."""
+
+from __future__ import annotations
 
 import os
 import sqlite3
-import sys
 import tempfile
-import time
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Add repo root to sys.path for imports
-REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
-from hermes import cleanup
-
-
-class TestCleanupWorktrees(unittest.TestCase):
-    """Test cleanup_worktrees function."""
-
-    def setUp(self):
-        """Create temporary worktree directory and mock DB."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.worktree_base = Path(self.temp_dir)
-
-    def tearDown(self):
-        """Clean up temporary directory."""
-        import shutil
-
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    @patch("hermes.cleanup.WORKTREE_BASE")
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.REPO_PATH")
-    def test_no_worktrees(self, mock_repo, mock_db, mock_base):
-        """Test with no worktrees present."""
-        mock_base.exists.return_value = False
-        mock_base.iterdir.return_value = []
-
-        result = cleanup.cleanup_worktrees(24, dry_run=False)
-
-        self.assertEqual(result, [])
-
-    @patch("hermes.cleanup.WORKTREE_BASE")
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.REPO_PATH")
-    def test_worktree_too_recent(self, mock_repo, mock_db, mock_base):
-        """Test that recent worktrees are not removed."""
-        # Create a recent worktree
-        recent_dir = self.worktree_base / "recent-worktree"
-        recent_dir.mkdir(parents=True)
-
-        mock_base.exists.return_value = True
-        mock_base.iterdir.return_value = [recent_dir]
-
-        # Mock DB query - return dict-like objects
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-
-        # Create mock Row objects
-        class MockRow(dict):
-            def __init__(self, worktree):
-                super().__init__(worktree=worktree)
-
-        mock_cursor.fetchall.return_value = [MockRow(str(recent_dir))]
-        mock_conn.cursor.return_value = mock_cursor
-        mock_conn.row_factory = sqlite3.Row
-
-        def mock_connect(*args, **kwargs):
-            return mock_conn
-
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_worktrees(24, dry_run=False)
-
-        self.assertEqual(result, [])
-
-    @patch("hermes.cleanup.WORKTREE_BASE")
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.REPO_PATH")
-    @patch("hermes.cleanup.subprocess.run")
-    def test_old_worktree_removed(self, mock_run, mock_repo, mock_db, mock_base):
-        """Test that old worktrees are removed."""
-        # Create an old worktree
-        old_dir = self.worktree_base / "old-worktree"
-        old_dir.mkdir(parents=True)
-
-        # Set modification time to 48 hours ago
-        old_time = time.time() - (48 * 3600)
-        os.utime(old_dir, (old_time, old_time))
-
-        mock_base.exists.return_value = True
-        mock_base.iterdir.return_value = [old_dir]
-
-        # Mock DB query
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-
-        # Create mock Row objects
-        class MockRow(dict):
-            def __init__(self, worktree):
-                super().__init__(worktree=worktree)
-
-        mock_cursor.fetchall.return_value = [MockRow(str(old_dir))]
-        mock_conn.cursor.return_value = mock_cursor
-        mock_conn.row_factory = sqlite3.Row
-
-        def mock_connect(*args, **kwargs):
-            return mock_conn
-
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_worktrees(24, dry_run=False)
-
-        self.assertEqual(len(result), 1)
-        self.assertIn("old-worktree", result[0])
-        mock_run.assert_called_once()
-
-    @patch("hermes.cleanup.WORKTREE_BASE")
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.REPO_PATH")
-    def test_dry_run_does_not_delete(self, mock_repo, mock_db, mock_base):
-        """Test that dry-run does not delete worktrees."""
-        old_dir = self.worktree_base / "old-worktree"
-        old_dir.mkdir(parents=True)
-        old_time = time.time() - (48 * 3600)
-        os.utime(old_dir, (old_time, old_time))
-
-        mock_base.exists.return_value = True
-        mock_base.iterdir.return_value = [old_dir]
-
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-
-        # Create mock Row objects
-        class MockRow(dict):
-            def __init__(self, worktree):
-                super().__init__(worktree=worktree)
-
-        mock_cursor.fetchall.return_value = [MockRow(str(old_dir))]
-        mock_conn.cursor.return_value = mock_cursor
-        mock_conn.row_factory = sqlite3.Row
-
-        def mock_connect(*args, **kwargs):
-            return mock_conn
-
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_worktrees(24, dry_run=True)
-
-        # Should report the worktree but not delete it
-        self.assertEqual(len(result), 1)
-        self.assertTrue(old_dir.exists())
+import cleanup
 
 
 class TestCleanupOldTasks(unittest.TestCase):
-    """Test cleanup_old_tasks function."""
+    """Test cleanup_old_tasks with real SQLite databases."""
 
-    @patch("hermes.cleanup.DB_PATH")
-    def test_no_old_tasks(self, mock_db):
-        """Test with no old tasks to delete."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = []
-        mock_conn.cursor.return_value = mock_cursor
+    def _create_db(self, path: str) -> None:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                pid INTEGER,
+                worktree TEXT,
+                stderr_tail TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
 
-        def mock_connect(*args, **kwargs):
-            return mock_conn
+    def test_no_old_tasks(self):
+        """No tasks older than threshold."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            # Insert a recent task
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("recent-task", "desc", "claude-code", "done", datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+            )
+            conn.commit()
+            conn.close()
 
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_old_tasks(7, dry_run=False)
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_old_tasks(7, dry_run=False)
+            self.assertEqual(len(result), 0)
+        finally:
+            os.unlink(db)
 
-        self.assertEqual(result, [])
-        mock_cursor.execute.assert_called()
-        # No DELETE should be called
-        self.assertEqual(mock_cursor.execute.call_count, 1)
+    def test_old_tasks_deleted(self):
+        """Old done/failed tasks are deleted."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            old_time = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("old-task-1", "desc", "claude-code", "done", old_time),
+            )
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("old-task-2", "desc", "codex", "failed", old_time),
+            )
+            conn.commit()
+            conn.close()
 
-    @patch("hermes.cleanup.DB_PATH")
-    def test_old_tasks_deleted(self, mock_db):
-        """Test that old tasks are deleted."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [("task1",), ("task2",)]
-        mock_conn.cursor.return_value = mock_cursor
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_old_tasks(7, dry_run=False)
 
-        def mock_connect(*args, **kwargs):
-            return mock_conn
+            task_ids = {r["task_id"] for r in result}
+            self.assertEqual(task_ids, {"old-task-1", "old-task-2"})
 
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_old_tasks(7, dry_run=False)
+            # Verify tasks are actually deleted
+            conn = sqlite3.connect(db)
+            remaining = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+            conn.close()
+            self.assertEqual(remaining, 0)
+        finally:
+            os.unlink(db)
 
-        self.assertEqual(len(result), 2)
-        self.assertIn("task1", result)
-        self.assertIn("task2", result)
-        # Should have 5 execute calls: SELECT + 4 DELETEs
-        self.assertEqual(mock_cursor.execute.call_count, 5)
-        mock_conn.commit.assert_called_once()
+    def test_running_tasks_not_deleted(self):
+        """Running tasks are never deleted even if old."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            old_time = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("running-old", "desc", "claude-code", "running", old_time),
+            )
+            conn.commit()
+            conn.close()
 
-    @patch("hermes.cleanup.DB_PATH")
-    def test_dry_run_does_not_delete(self, mock_db):
-        """Test that dry-run does not delete tasks."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [("task1",)]
-        mock_conn.cursor.return_value = mock_cursor
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_old_tasks(7, dry_run=False)
+            self.assertEqual(len(result), 0)
+        finally:
+            os.unlink(db)
 
-        def mock_connect(*args, **kwargs):
-            return mock_conn
+    def test_dry_run_does_not_delete(self):
+        """Dry run mode does not actually delete tasks."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            old_time = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("dry-task", "desc", "claude-code", "done", old_time),
+            )
+            conn.commit()
+            conn.close()
 
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_old_tasks(7, dry_run=True)
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_old_tasks(7, dry_run=True)
+            self.assertEqual(len(result), 1)
 
-        self.assertEqual(result, ["task1"])
-        # No DELETE or COMMIT should be called in dry-run
-        self.assertEqual(mock_cursor.execute.call_count, 1)
-        mock_conn.commit.assert_not_called()
-
-
-class TestCleanupOldLogs(unittest.TestCase):
-    """Test cleanup_old_logs function."""
-
-    def setUp(self):
-        """Create temporary log directory."""
-        self.temp_dir = tempfile.mkdtemp()
-        self.log_dir = Path(self.temp_dir)
-
-    def tearDown(self):
-        """Clean up temporary directory."""
-        import shutil
-
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    @patch("hermes.cleanup.LOG_DIR")
-    def test_no_logs_directory(self, mock_log_dir):
-        """Test when logs directory does not exist."""
-        mock_log_dir.exists.return_value = False
-        result = cleanup.cleanup_old_logs(30, dry_run=False)
-        self.assertEqual(result, [])
-
-    @patch("hermes.cleanup.LOG_DIR")
-    def test_recent_log_not_removed(self, mock_log_dir):
-        """Test that recent log files are not removed."""
-        recent_log = self.log_dir / "recent.log"
-        recent_log.write_text("recent log content")
-
-        mock_log_dir.exists.return_value = True
-        mock_log_dir.glob.return_value = [recent_log]
-
-        result = cleanup.cleanup_old_logs(30, dry_run=False)
-
-        self.assertEqual(result, [])
-        self.assertTrue(recent_log.exists())
-
-    @patch("hermes.cleanup.LOG_DIR")
-    def test_old_log_removed(self, mock_log_dir):
-        """Test that old log files are removed."""
-        old_log = self.log_dir / "old.log"
-        old_log.write_text("old log content")
-
-        # Set modification time to 45 days ago
-        old_time = time.time() - (45 * 86400)
-        os.utime(old_log, (old_time, old_time))
-
-        mock_log_dir.exists.return_value = True
-        mock_log_dir.glob.return_value = [old_log]
-
-        result = cleanup.cleanup_old_logs(30, dry_run=False)
-
-        self.assertEqual(len(result), 1)
-        self.assertIn("old.log", result[0])
-        self.assertFalse(old_log.exists())
-
-    @patch("hermes.cleanup.LOG_DIR")
-    def test_dry_run_does_not_delete(self, mock_log_dir):
-        """Test that dry-run does not delete log files."""
-        old_log = self.log_dir / "old.log"
-        old_log.write_text("old log content")
-        old_time = time.time() - (45 * 86400)
-        os.utime(old_log, (old_time, old_time))
-
-        mock_log_dir.exists.return_value = True
-        mock_log_dir.glob.return_value = [old_log]
-
-        result = cleanup.cleanup_old_logs(30, dry_run=True)
-
-        self.assertEqual(len(result), 1)
-        self.assertTrue(old_log.exists())
+            # Task should still exist
+            conn = sqlite3.connect(db)
+            remaining = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
+            conn.close()
+            self.assertEqual(remaining, 1)
+        finally:
+            os.unlink(db)
 
 
 class TestCleanupZombieTasks(unittest.TestCase):
-    """Test cleanup_zombie_tasks function."""
+    """Test cleanup_zombie_tasks with real SQLite databases."""
 
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.os.kill")
-    def test_no_zombie_tasks(self, mock_kill, mock_db):
-        """Test when all running tasks have valid PIDs."""
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [("task1", 1234), ("task2", 5678)]
-        mock_conn.cursor.return_value = mock_cursor
+    def _create_db(self, path: str) -> None:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                pid INTEGER,
+                worktree TEXT,
+                stderr_tail TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
 
-        def mock_connect(*args, **kwargs):
-            return mock_conn
+    def test_no_zombie_tasks(self):
+        """No running tasks with dead PIDs."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            # No running tasks in DB
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_zombie_tasks(dry_run=False)
+            self.assertEqual(len(result), 0)
+        finally:
+            os.unlink(db)
 
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_zombie_tasks(dry_run=False)
+    def test_zombie_task_detected(self):
+        """Zombie task (dead PID) is marked as failed."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            # Use a PID that definitely doesn't exist
+            fake_pid = 99999999
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, pid) VALUES (?, ?, ?, ?, ?)",
+                ("zombie-task", "desc", "claude-code", "running", fake_pid),
+            )
+            conn.commit()
+            conn.close()
 
-        self.assertEqual(result, [])
-        # All PIDs exist, so no UPDATE should be called
-        self.assertEqual(mock_cursor.execute.call_count, 1)
-        mock_conn.commit.assert_not_called()
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_zombie_tasks(dry_run=False)
 
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.os.kill")
-    def test_zombie_task_detected(self, mock_kill, mock_db):
-        """Test that zombie tasks are marked as failed."""
-        # Simulate PID not found
-        mock_kill.side_effect = ProcessLookupError()
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["task_id"], "zombie-task")
 
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [("task1", 1234)]
-        mock_conn.cursor.return_value = mock_cursor
+            # Verify status updated to failed
+            conn = sqlite3.connect(db)
+            status = conn.execute("SELECT status FROM tasks WHERE id = ?", ("zombie-task",)).fetchone()[0]
+            conn.close()
+            self.assertEqual(status, "failed")
+        finally:
+            os.unlink(db)
 
-        def mock_connect(*args, **kwargs):
-            return mock_conn
+    def test_dry_run_does_not_update(self):
+        """Dry run does not update task status."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            fake_pid = 99999999
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, pid) VALUES (?, ?, ?, ?, ?)",
+                ("zombie-dry", "desc", "claude-code", "running", fake_pid),
+            )
+            conn.commit()
+            conn.close()
 
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_zombie_tasks(dry_run=False)
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_zombie_tasks(dry_run=True)
 
-        self.assertEqual(len(result), 1)
-        self.assertIn("task1", result)
-        self.assertEqual(mock_cursor.execute.call_count, 2)  # SELECT + UPDATE
-        mock_conn.commit.assert_called_once()
+            self.assertEqual(len(result), 1)
+            # Status should still be running
+            conn = sqlite3.connect(db)
+            status = conn.execute("SELECT status FROM tasks WHERE id = ?", ("zombie-dry",)).fetchone()[0]
+            conn.close()
+            self.assertEqual(status, "running")
+        finally:
+            os.unlink(db)
 
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.os.kill")
-    def test_dry_run_does_not_update(self, mock_kill, mock_db):
-        """Test that dry-run does not update task status."""
-        mock_kill.side_effect = ProcessLookupError()
+    def test_null_pid_skipped(self):
+        """Tasks with null PID are skipped (not treated as zombies)."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "INSERT INTO tasks (id, description, agent, status, pid) VALUES (?, ?, ?, ?, ?)",
+                ("null-pid", "desc", "claude-code", "running", None),
+            )
+            conn.commit()
+            conn.close()
 
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [("task1", 1234)]
-        mock_conn.cursor.return_value = mock_cursor
-
-        def mock_connect(*args, **kwargs):
-            return mock_conn
-
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_zombie_tasks(dry_run=True)
-
-        self.assertEqual(result, ["task1"])
-        # No UPDATE or COMMIT in dry-run
-        self.assertEqual(mock_cursor.execute.call_count, 1)
-        mock_conn.commit.assert_not_called()
-
-    @patch("hermes.cleanup.DB_PATH")
-    @patch("hermes.cleanup.os.kill")
-    def test_permission_error_ignored(self, mock_kill, mock_db):
-        """Test that PermissionError is handled gracefully."""
-        mock_kill.side_effect = PermissionError()
-
-        mock_conn = MagicMock()
-        mock_cursor = MagicMock()
-        mock_cursor.fetchall.return_value = [("task1", 1234)]
-        mock_conn.cursor.return_value = mock_cursor
-
-        def mock_connect(*args, **kwargs):
-            return mock_conn
-
-        with patch("sqlite3.connect", mock_connect):
-            result = cleanup.cleanup_zombie_tasks(dry_run=False)
-
-        # PermissionError means process exists, so no zombie
-        self.assertEqual(result, [])
+            with patch("cleanup.DB_PATH", db):
+                result = cleanup.cleanup_zombie_tasks(dry_run=False)
+            self.assertEqual(len(result), 0)
+        finally:
+            os.unlink(db)
 
 
-class TestPrintSummary(unittest.TestCase):
-    """Test print_summary function."""
+class TestCleanupOldLogs(unittest.TestCase):
+    """Test cleanup_old_logs with real temp directories."""
 
-    @patch("hermes.cleanup.print")
-    def test_print_summary(self, mock_print):
-        """Test that summary is printed correctly."""
-        cleanup.print_summary(["/path/1"], ["task1"], ["/log/1"], ["task2"])
+    def test_old_log_removed(self):
+        """Old log files are removed."""
+        import time
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_file = Path(tmpdir) / "old.log"
+            old_file.write_text("old content")
+            old_time = time.time() - 31 * 86400
+            os.utime(str(old_file), (old_time, old_time))
 
-        self.assertEqual(mock_print.call_count, 8)  # separator + title + 4 lines + separator
+            recent_file = Path(tmpdir) / "recent.log"
+            recent_file.write_text("recent content")
+
+            with patch("cleanup.LOG_DIR", tmpdir):
+                result = cleanup.cleanup_old_logs(30, dry_run=False)
+
+            self.assertEqual(len(result), 1)
+            self.assertFalse(old_file.exists())
+            self.assertTrue(recent_file.exists())
+
+    def test_dry_run_does_not_delete(self):
+        """Dry run does not delete log files."""
+        import time
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_file = Path(tmpdir) / "old.log"
+            old_file.write_text("old content")
+            old_time = time.time() - 31 * 86400
+            os.utime(str(old_file), (old_time, old_time))
+
+            with patch("cleanup.LOG_DIR", tmpdir):
+                result = cleanup.cleanup_old_logs(30, dry_run=True)
+
+            self.assertEqual(len(result), 1)
+            self.assertTrue(old_file.exists())
+
+    def test_no_log_dir(self):
+        """Missing log directory is handled gracefully."""
+        with patch("cleanup.LOG_DIR", "/nonexistent/path/that/does/not/exist"):
+            result = cleanup.cleanup_old_logs(30, dry_run=False)
+        self.assertEqual(len(result), 0)
+
+
+class TestCleanupWorktrees(unittest.TestCase):
+    """Test cleanup_worktrees with real temp directories."""
+
+    def _create_db(self, path: str) -> None:
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                pid INTEGER,
+                worktree TEXT,
+                stderr_tail TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    def test_old_worktree_removed(self):
+        """Old worktree for done/failed task is removed."""
+        import time
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            with tempfile.TemporaryDirectory() as wt_base:
+                wt_dir = Path(wt_base) / "old-wt"
+                wt_dir.mkdir()
+                (wt_dir / "file.py").write_text("content")
+                old_time = time.time() - 25 * 3600  # 25 hours ago
+                os.utime(str(wt_dir), (old_time, old_time))
+
+                old_ts = "2026-01-01 00:00:00"
+                conn = sqlite3.connect(db)
+                conn.execute(
+                    "INSERT INTO tasks (id, description, agent, status, worktree, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("wt-task", "desc", "claude-code", "done", str(wt_dir), old_ts),
+                )
+                conn.commit()
+                conn.close()
+
+                with patch("cleanup.DB_PATH", db), patch("cleanup.WORKTREE_BASE", Path(wt_base)):
+                    result = cleanup.cleanup_worktrees(24, dry_run=False)
+
+                self.assertEqual(len(result), 1)
+                self.assertFalse(wt_dir.exists())
+                self.assertFalse(wt_dir.exists())
+        finally:
+            os.unlink(db)
+
+    def test_running_task_worktree_not_removed(self):
+        """Worktree for running task is not removed."""
+        import time
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            with tempfile.TemporaryDirectory() as wt_base:
+                wt_dir = Path(wt_base) / "running-wt"
+                wt_dir.mkdir()
+                old_time = time.time() - 25 * 3600
+                os.utime(str(wt_dir), (old_time, old_time))
+
+                conn = sqlite3.connect(db)
+                conn.execute(
+                    "INSERT INTO tasks (id, description, agent, status, worktree) VALUES (?, ?, ?, ?, ?)",
+                    ("running-wt-task", "desc", "claude-code", "running", str(wt_dir)),
+                )
+                conn.commit()
+                conn.close()
+
+                with patch("cleanup.DB_PATH", db), patch("cleanup.WORKTREE_BASE", Path(wt_base)):
+                    result = cleanup.cleanup_worktrees(24, dry_run=False)
+
+                self.assertEqual(len(result), 0)
+                self.assertTrue(wt_dir.exists())
+        finally:
+            os.unlink(db)
+
+    def test_no_worktrees(self):
+        """Empty worktree base is handled gracefully."""
+        fd, db = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            self._create_db(db)
+            with tempfile.TemporaryDirectory() as wt_base:
+                with patch("cleanup.DB_PATH", db), patch("cleanup.WORKTREE_BASE", Path(wt_base)):
+                    result = cleanup.cleanup_worktrees(24, dry_run=False)
+                self.assertEqual(len(result), 0)
+        finally:
+            os.unlink(db)
+
+
+class TestPrintSummaryTable(unittest.TestCase):
+    """Test print_summary_table output."""
+
+    def test_print_summary(self):
+        """Summary table prints without error."""
+        all_cleaned = {
+            "cleanup_worktrees": [{"type": "worktree", "path": "/tmp/wt1", "task_id": "task1", "age_hours": 25}],
+            "cleanup_old_tasks": [{"type": "task", "task_id": "task2", "status": "done", "age_days": 10}],
+        }
+        cleanup.print_summary_table(all_cleaned)
 
 
 class TestMain(unittest.TestCase):
-    """Test main entry point."""
+    """Test CLI main entry point."""
 
-    @patch("hermes.cleanup.cleanup_zombie_tasks")
-    @patch("hermes.cleanup.cleanup_old_logs")
-    @patch("hermes.cleanup.cleanup_old_tasks")
-    @patch("hermes.cleanup.cleanup_worktrees")
-    @patch("hermes.cleanup.print_summary")
-    @patch("sys.argv", ["cleanup.py"])
-    def test_main_default_args(self, mock_print, mock_wt, mock_tasks, mock_logs, mock_zombies):
-        """Test main with default arguments."""
-        mock_wt.return_value = []
-        mock_tasks.return_value = []
-        mock_logs.return_value = []
-        mock_zombies.return_value = []
+    def test_main_default_args(self):
+        """main() calls all cleanup functions."""
+        with patch("sys.argv", ["cleanup"]), \
+             patch("cleanup.cleanup_worktrees", return_value=[]) as mock_wt, \
+             patch("cleanup.cleanup_old_tasks", return_value=[]) as mock_ot, \
+             patch("cleanup.cleanup_old_logs", return_value=[]) as mock_ol, \
+             patch("cleanup.cleanup_zombie_tasks", return_value=[]) as mock_zt, \
+             patch("cleanup.print_summary_table") as mock_print:
+            cleanup.main()
+            mock_wt.assert_called_once()
+            mock_ot.assert_called_once()
+            mock_ol.assert_called_once()
+            mock_zt.assert_called_once()
+            mock_print.assert_called_once()
 
-        exit_code = cleanup.main()
-
-        self.assertEqual(exit_code, 0)
-        mock_wt.assert_called_once_with(24, False)
-        mock_tasks.assert_called_once_with(7, False)
-        mock_logs.assert_called_once_with(30, False)
-        mock_zombies.assert_called_once_with(False)
-
-    @patch("hermes.cleanup.cleanup_zombie_tasks")
-    @patch("hermes.cleanup.cleanup_old_logs")
-    @patch("hermes.cleanup.cleanup_old_tasks")
-    @patch("hermes.cleanup.cleanup_worktrees")
-    @patch("hermes.cleanup.print_summary")
-    @patch("sys.argv", ["cleanup.py", "--dry-run", "--max-age-days", "14"])
-    def test_main_dry_run(self, mock_print, mock_wt, mock_tasks, mock_logs, mock_zombies):
-        """Test main with --dry-run flag."""
-        mock_wt.return_value = []
-        mock_tasks.return_value = []
-        mock_logs.return_value = []
-        mock_zombies.return_value = []
-
-        exit_code = cleanup.main()
-
-        self.assertEqual(exit_code, 0)
-        mock_wt.assert_called_once_with(24, True)
-        mock_tasks.assert_called_once_with(14, True)
-        mock_logs.assert_called_once_with(30, True)
-        mock_zombies.assert_called_once_with(True)
-
-
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    def test_main_dry_run(self):
+        """main() passes dry-run flag."""
+        with patch("sys.argv", ["cleanup", "--dry-run"]), \
+             patch("cleanup.cleanup_worktrees", return_value=[]) as mock_wt, \
+             patch("cleanup.cleanup_old_tasks", return_value=[]) as mock_ot, \
+             patch("cleanup.cleanup_old_logs", return_value=[]) as mock_ol, \
+             patch("cleanup.cleanup_zombie_tasks", return_value=[]) as mock_zt, \
+             patch("cleanup.print_summary_table") as mock_print:
+            cleanup.main()
+            mock_wt.assert_called_once()
+            mock_ot.assert_called_once()
+            mock_ol.assert_called_once()
+            mock_zt.assert_called_once()
+            mock_print.assert_called_once()

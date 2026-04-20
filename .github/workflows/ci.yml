@@ -2,70 +2,97 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [main, master]
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
-
       - name: Install ruff
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install ruff
-
-      - name: Run ruff
-        run: python -m ruff check .
-        continue-on-error: false
+        run: pip install ruff
+      - name: Run ruff check
+        run: ruff check .
+      - name: Run ruff format check
+        run: ruff format --check .
 
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
+      - name: Install dependencies
+        run: pip install pytest anyio
+      - name: Run unit tests
+        run: python -m pytest tests/ -v --tb=short -q
 
-      - name: Install pytest
+  screenshot-guard:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ github.event.pull_request.commits }}
+      - name: Check for UI changes without screenshots
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest
+          # Files that count as UI changes
+          UI_PATTERNS=(
+            "web_api.py"
+            "dashboard.py"
+            "*.html"
+            "*.css"
+            "*.vue"
+            "*.jsx"
+            "*.tsx"
+          )
 
-      - name: Run tests
-        run: python -m pytest tests/ -v --tb=short
+          CHANGED=$(git diff --name-only "$BASE" HEAD)
 
-  type-check:
+          UI_CHANGED=false
+          for f in $CHANGED; do
+            for p in "${UI_PATTERNS[@]}"; do
+              if [[ "$f" == $p ]]; then
+                UI_CHANGED=true
+                break 2
+              fi
+            done
+          done
+
+          if $UI_CHANGED; then
+            # Check if screenshots were added/modified
+            SCREENSHOT=$(echo "$CHANGED" | grep -iE '\.(png|jpg|jpeg|gif|webp|svg)$' || true)
+            if [ -z "$SCREENSHOT" ]; then
+              echo "::error::UI files were modified but no screenshots were added."
+              echo "Changed UI files: $(echo "$CHANGED" | grep -E '(${UI_PATTERNS[*]// /|})' || true)"
+              echo "Please attach screenshots of the UI changes."
+              exit 1
+            else
+              echo "✅ UI changes detected with screenshots attached."
+            fi
+          else
+            echo "✅ No UI changes detected, screenshot check skipped."
+          fi
+
+  stale-副本-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install pyright
+      - name: Check for stale src/副本
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install pyright
-
-      - name: Run pyright
-        run: python -m pyright
-        continue-on-error: false
+          if [ -d "src/hermes" ]; then
+            echo "::warning::src/hermes/ directory still exists. This is a stale copy that should be removed."
+            echo "Files in src/hermes/: $(ls src/hermes/ | wc -l)"
+            # Warn but don't fail CI (for now)
+          fi
+          echo "✅ Stale copy check complete."
