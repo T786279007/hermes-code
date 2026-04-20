@@ -43,10 +43,13 @@ _INJECTION_PATTERNS = [
     r"base64[:\s]",
     r"(?i)\\x[0-9a-f]{2}",
     r"(?i)\\u[0-9a-f]{4}",
-    # Credential/access extraction
-    r"(?i)(password|secret|token|api.?key|credential)",
-    r"(?i)(\.env|\.ssh|\.aws|\.gpg|\.gnupg)",
-    r"(?i)/etc/(passwd|shadow|hosts)",
+    # Credential/access extraction (require action verbs like "show", "reveal", "print", "output", "display", "extract", "read the value of")
+    r"(?i)(show|reveal|print|output|display|extract|dump|get\s+the\s+value\s+of|read\s+the\s+value)\s+(the\s+)?(password|secret|token|api.?key|credential)",
+    r"(?i)(password|secret|token|api.?key|credential)\s*(value|is|:|=)\s*['\"]",
+    r"(?i)\.env\s+(file\s+)?content",
+    r"(?i)(cat|less|more|head|tail)\s+.*(/etc/passwd|\.env|\.ssh/|\.aws/)",
+    r"(?i)(read|open|load|show)\s+(the\s+)?(contents?\s+(of\s+)?)?~/\.ssh",
+    r"(?i)/etc/(passwd|shadow)",
 ]
 
 # Compiled regex patterns

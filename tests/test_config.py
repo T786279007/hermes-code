@@ -52,7 +52,7 @@ class TestConfigConstants(unittest.TestCase):
         self.assertEqual(config.CIRCUIT_BREAKER_RESET, 300)
 
     def test_repo_path(self):
-        self.assertEqual(config.REPO_PATH, "/tmp/hermes-repo")
+        self.assertEqual(config.REPO_PATH, "/home/txs/hermes")
 
     def test_worktree_base_is_path_object(self):
         self.assertIsInstance(config.WORKTREE_BASE, Path)
