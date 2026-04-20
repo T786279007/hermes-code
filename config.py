@@ -18,7 +18,7 @@ CIRCUIT_BREAKER_THRESHOLD = 3
 CIRCUIT_BREAKER_RESET = 300
 RECONCILER_TIMEOUT = 600  # Default fallback timeout for tasks without a known agent profile
 
-REPO_PATH = "/tmp/hermes-repo"
+REPO_PATH = "/home/txs/hermes"
 
 # Cost control (P1-3: per-task cost ceiling)
 # Default: $1.00 per task. Kill process if exceeded.
