@@ -204,7 +204,7 @@ class TestHermesE2E(unittest.TestCase):
         self.executor.claude_runner = mock_runner
 
         # Submit task
-        task = self.executor.submit("implement login feature")
+        task = self.executor.submit_and_execute("implement login feature")
 
         # Verify task reached status=done
         self.assertEqual(task["status"], "done")
@@ -223,7 +223,7 @@ class TestHermesE2E(unittest.TestCase):
         mock_runner = MockClaudeRunner(exit_code=0, stdout="Feature implemented with tests")
         self.executor.claude_runner = mock_runner
 
-        task = self.executor.submit("add user authentication")
+        task = self.executor.submit_and_execute("add user authentication")
 
         # Verify all expected properties
         self.assertEqual(task["agent"], "claude-code")
@@ -267,7 +267,7 @@ class TestHermesE2E(unittest.TestCase):
         mock_runner.run = flaky_runner
         self.executor.claude_runner = mock_runner
 
-        task = self.executor.submit("implement api endpoint")
+        task = self.executor.submit_and_execute("implement api endpoint")
 
         # Verify retry happened and task succeeded
         self.assertEqual(task["status"], "done")
@@ -286,7 +286,7 @@ class TestHermesE2E(unittest.TestCase):
         )
         self.executor.claude_runner = mock_runner
 
-        task = self.executor.submit("attempt unauthorized operation")
+        task = self.executor.submit_and_execute("attempt unauthorized operation")
 
         # Verify permanent failure
         self.assertEqual(task["status"], "failed")
@@ -309,15 +309,15 @@ class TestHermesE2E(unittest.TestCase):
         self.executor.claude_runner = mock_runner
 
         # Submit first failing task - will exhaust all retries (3 attempts)
-        task1 = self.executor.submit("failing task 1")
+        task1 = self.executor.submit_and_execute("failing task 1")
         self.assertEqual(task1["status"], "failed")
 
         # Submit second failing task
-        task2 = self.executor.submit("failing task 2")
+        task2 = self.executor.submit_and_execute("failing task 2")
         self.assertEqual(task2["status"], "failed")
 
         # Submit third failing task
-        task3 = self.executor.submit("failing task 3")
+        task3 = self.executor.submit_and_execute("failing task 3")
         self.assertEqual(task3["status"], "failed")
 
         # Verify circuit breaker is now open
@@ -328,7 +328,7 @@ class TestHermesE2E(unittest.TestCase):
         initial_count = mock_runner_success.call_count
         self.executor.claude_runner = mock_runner_success
 
-        task4 = self.executor.submit("this should not run")
+        task4 = self.executor.submit_and_execute("this should not run")
         self.assertEqual(task4["status"], "failed")
         self.assertIn("Circuit breaker", task4.get("stderr_tail", ""))
         self.assertEqual(mock_runner_success.call_count, initial_count)  # Runner not called
@@ -341,7 +341,7 @@ class TestHermesE2E(unittest.TestCase):
         mock_runner = MockClaudeRunner(exit_code=0, stdout="Task completed successfully")
         self.executor.claude_runner = mock_runner
 
-        task = self.executor.submit("implement feature")
+        task = self.executor.submit_and_execute("implement feature")
 
         # Check DB for outbox entry
         with self.registry._connect() as conn:
@@ -368,7 +368,7 @@ class TestHermesE2E(unittest.TestCase):
         )
         self.executor.claude_runner = mock_runner
 
-        task = self.executor.submit("failing task")
+        task = self.executor.submit_and_execute("failing task")
 
         # Check DB for failure notification
         with self.registry._connect() as conn:
@@ -451,7 +451,7 @@ class TestHermesE2E(unittest.TestCase):
         self.executor.codex_runner = mock_codex
 
         # Override to use codex
-        task = self.executor.submit("review this code", override="codex")
+        task = self.executor.submit_and_execute("review this code", override="codex")
 
         self.assertEqual(task["status"], "done")
         self.assertEqual(task["agent"], "codex")
@@ -465,7 +465,7 @@ class TestHermesE2E(unittest.TestCase):
         mock_runner = MockClaudeRunner(exit_code=0)
         self.executor.claude_runner = mock_runner
 
-        task = self.executor.submit("implement feature")
+        task = self.executor.submit_and_execute("implement feature")
 
         # Verify worktree still exists
         worktree_path = self.mock_worktrees.get(task["id"])
@@ -484,7 +484,7 @@ class TestHermesE2E(unittest.TestCase):
         )
         self.executor.claude_runner = mock_runner
 
-        task = self.executor.submit("failing task")
+        task = self.executor.submit_and_execute("failing task")
 
         # Verify worktree was cleaned up
         worktree_path = self.mock_worktrees.get(task["id"])

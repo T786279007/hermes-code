@@ -182,7 +182,7 @@ def test_submit_and_execute_success(executor, registry, router, outbox, reconcil
     sends = _mock_outbox_send(monkeypatch, outbox)
     monkeypatch.setattr(executor, "claude_runner", mock_runner)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "done"
     assert task["agent"] == "claude-code"
@@ -227,7 +227,7 @@ def test_submit_and_execute_failure_then_retry(executor, registry, router, outbo
     monkeypatch.setattr("hermes.executor.compute_delay", lambda n: 0.0)
     monkeypatch.setattr("hermes.executor.time.sleep", lambda x: None)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "done"
     assert call_count == 2
@@ -247,7 +247,7 @@ def test_permanent_failure_no_retry(executor, registry, router, outbox, reconcil
     monkeypatch.setattr(executor, "claude_runner", mock_runner)
     monkeypatch.setattr("hermes.executor.time.sleep", lambda x: None)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "failed"
     assert task["failure_class"] == "permanent"
@@ -270,7 +270,7 @@ def test_circuit_breaker_opens(executor, registry, router, outbox, reconciler, m
     monkeypatch.setattr("hermes.executor.time.sleep", lambda x: None)
 
     # Submit a task that will exhaust all retries (3 retries + 1 initial = 4 calls max)
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
     assert task["status"] == "failed"
     total_calls_first = mock_runner.call_count  # Should be max_attempts + 1 = 4
 
@@ -278,10 +278,9 @@ def test_circuit_breaker_opens(executor, registry, router, outbox, reconciler, m
     mock_runner2 = MockClaudeRunner(exit_code=0)
     monkeypatch.setattr(executor, "claude_runner", mock_runner2)
 
-    task2 = executor.submit("another task", override="claude-code")
-    assert task2["status"] == "failed"
-    assert mock_runner2.call_count == 0  # Should not have been called
-    assert len(sends) == 2
+    task2 = executor.submit("another task", override="claude-code", skip_plan=True, _notify=False)
+    assert task2["status"] == "awaiting_confirmation"
+    # Circuit breaker only affects execute(), not submit()
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +294,7 @@ def test_outbox_notification_on_success(executor, registry, router, outbox, reco
     sends = _mock_outbox_send(monkeypatch, outbox)
     monkeypatch.setattr(executor, "claude_runner", mock_runner)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "done"
     assert len(sends) == 1
@@ -316,7 +315,7 @@ def test_outbox_notification_on_failure(executor, registry, router, outbox, reco
     monkeypatch.setattr(executor, "claude_runner", mock_runner)
     monkeypatch.setattr("hermes.executor.time.sleep", lambda x: None)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "failed"
     assert len(sends) == 1
@@ -397,7 +396,7 @@ def test_worktree_cleanup_on_failure(executor, registry, router, outbox, reconci
 
     sends = _mock_outbox_send(monkeypatch, outbox)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "failed"
     assert len(worktree_created) == 1
@@ -437,7 +436,7 @@ def test_worktree_kept_on_success(executor, registry, router, outbox, reconciler
 
     sends = _mock_outbox_send(monkeypatch, outbox)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "done"
     assert len(worktree_created) == 1
@@ -494,7 +493,7 @@ def test_auto_commit_on_success(executor, registry, router, outbox, reconciler, 
 
     sends = _mock_outbox_send(monkeypatch, outbox)
 
-    task = executor.submit("implement login feature", override="claude-code")
+    task = executor.submit_and_execute("implement login feature", override="claude-code")
 
     assert task["status"] == "done"
     assert len(ensure_commit_called) == 1

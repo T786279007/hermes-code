@@ -259,6 +259,24 @@ def _run_task_and_notify(task_id: str) -> None:
         logger.exception("Background execution failed for task %s", task_id)
 
 
+def _confirm_and_run(task_id: str) -> None:
+    """Confirm and execute a task in the background."""
+    from executor import TaskExecutor
+    from outbox import Outbox
+    from reconciler import Reconciler
+    from router import TaskRouter
+    from task_registry import TaskRegistry
+
+    registry = TaskRegistry(DB_PATH)
+    outbox = Outbox(registry)
+    executor = TaskExecutor(registry, TaskRouter(), outbox, Reconciler(registry))
+
+    try:
+        executor.confirm_and_execute(task_id)
+    except Exception:
+        logger.exception("Background confirm+execute failed for task %s", task_id)
+
+
 # ---------------------------------------------------------------------------
 # Session management
 # ---------------------------------------------------------------------------
@@ -452,39 +470,59 @@ async def get_task(task_id: str, _: None = Depends(_auth)):
 @app.post("/api/tasks")
 async def submit_task(
     req: TaskSubmitRequest,
-    background_tasks: BackgroundTasks,
     _: None = Depends(_auth),
 ):
-    """Submit a new task."""
-    # Import here to avoid circular deps
-    from execution_log import ExecutionLog
+    """Submit a new task (plan → doc → await confirmation)."""
     from task_registry import TaskRegistry
     from router import TaskRouter
+    from reconciler import Reconciler
+    from outbox import Outbox
 
     registry = TaskRegistry(DB_PATH)
-    router = TaskRouter()
+    executor = TaskExecutor(registry, TaskRouter(), Outbox(registry), Reconciler(registry))
 
     override = req.agent if req.agent in ("claude-code", "codex") else None
-    decision = router.route(req.description, override)
-    slug = _slugify(req.description)[:30]
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    task_id = f"feat-{slug}-{ts}"
+    task = executor.submit(req.description, override=override)
+    return {"task": _serialize_task(task), "message": "Task submitted, plan generation in progress"}
 
-    task = registry.create_task(
-        task_id=task_id,
-        description=req.description,
-        agent=decision.agent,
-        branch=f"hermes/{task_id}",
-        model=decision.model,
-    )
-    ExecutionLog(registry).append(
-        task_id,
-        f"Task submitted via web: agent={decision.agent} model={decision.model}",
-        source="system",
-    )
-    background_tasks.add_task(_run_task_and_notify, task_id)
-    logger.info("Task submitted via web: %s (agent=%s)", task_id, decision.agent)
-    return {"task": _serialize_task(task), "message": "Task submitted successfully"}
+
+# --- Confirm / Reject ---
+
+@app.post("/api/tasks/{task_id}/confirm")
+async def confirm_task(task_id: str, background_tasks: BackgroundTasks, _: None = Depends(_auth)):
+    """Confirm a task and start execution."""
+    from task_registry import TaskRegistry
+    from reconciler import Reconciler
+    from outbox import Outbox
+
+    registry = TaskRegistry(DB_PATH)
+    task = registry.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    if task["status"] != "awaiting_confirmation":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task is in status '{task['status']}', expected 'awaiting_confirmation'",
+        )
+    background_tasks.add_task(_confirm_and_run, task_id)
+    return {"task": _serialize_task(task), "message": "Task confirmed, execution started"}
+
+
+@app.post("/api/tasks/{task_id}/reject")
+async def reject_task(task_id: str, _: None = Depends(_auth)):
+    """Reject a task (cancel it)."""
+    from task_registry import TaskRegistry
+    registry = TaskRegistry(DB_PATH)
+    task = registry.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
+    if task["status"] != "awaiting_confirmation":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task is in status '{task['status']}', expected 'awaiting_confirmation'",
+        )
+    registry.finish_task(task_id, "failed", failure_class="permanent", stderr_tail="Rejected by user")
+    return {"task": _serialize_task(task), "message": "Task rejected"}
 
 
 # --- Commands ---
@@ -627,6 +665,7 @@ tr:hover{background:rgba(255,255,255,.02)}
 .badge.done{background:rgba(63,185,80,.15);color:var(--green)}.badge.failed{background:rgba(248,81,73,.15);color:var(--red)}
 .badge.running{background:rgba(88,166,255,.15);color:var(--accent)}.badge.retrying{background:rgba(210,153,34,.15);color:var(--yellow)}
 .badge.pending{background:rgba(139,148,158,.15);color:var(--text2)}
+.badge.planning{background:rgba(88,166,255,.15);color:var(--accent)}.badge.awaiting{background:rgba(210,153,34,.15);color:var(--yellow)}
 .task-id{font-family:'SF Mono',Monaco,monospace;font-size:11px;color:var(--accent);cursor:pointer;text-decoration:underline}
 .agent-tag{background:rgba(88,166,255,.1);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:11px}
 .result-preview{color:var(--text2);font-size:12px;max-width:400px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -664,7 +703,7 @@ tr:hover{background:rgba(255,255,255,.02)}
 <div id="empty" style="display:none;text-align:center;padding:60px;color:var(--text2)">No tasks found</div>
 <script>
 const API='/api/tasks';let currentFilter='';const SESSION_KEY='hermes_web_session';let sessionPromise=null;
-const STATUS_CLASS={pending:'pending',running:'running',retrying:'retrying',done:'done',failed:'failed'};
+const STATUS_CLASS={pending:'pending',running:'running',retrying:'retrying',done:'done',failed:'failed',planning:'planning',awaiting_confirmation:'awaiting'};
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
 async function loginWithPrompt(){
 const apiKey=window.prompt('Enter Hermes API key');
@@ -713,7 +752,7 @@ const tbody=document.getElementById('tbody');const empty=document.getElementById
 const filtered=currentFilter?tasks.filter(t=>t.status===currentFilter):tasks;
 if(!filtered.length){tbody.innerHTML='';empty.style.display='block';return}
 empty.style.display='none';
-tbody.innerHTML=filtered.map(t=>'<tr><td><a class="task-id" href="'+taskHref(t.id)+'" title="'+esc(t.id)+'">'+esc(t.id.length>30?t.id.slice(0,30)+'…':t.id)+'</a></td><td><span class="agent-tag">'+esc(t.agent)+'</span></td><td>'+(t.status==='running'?'<span class="pulse">'+statusBadge(t.status)+'</span>':statusBadge(t.status))+'</td><td>'+(t.duration_s!=null?t.duration_s+'s':'—')+'</td><td>'+(t.exit_code!=null?t.exit_code:'—')+'</td><td class="result-preview" title="'+esc(t.result||'')+'">'+esc((t.result||'').slice(0,100))+'</td><td style="white-space:nowrap;color:var(--text2)">'+esc(t.created_at)+'</td></tr>').join('');
+tbody.innerHTML=filtered.map(t=>'<tr><td><a class="task-id" href="'+taskHref(t.id)+'" title="'+esc(t.id)+'">'+esc(t.id.length>30?t.id.slice(0,30)+'…':t.id)+'</a></td><td><span class="agent-tag">'+esc(t.agent)+'</span></td><td>'+(t.status==='running'||t.status==='planning'?'<span class="pulse">'+statusBadge(t.status)+'</span>':statusBadge(t.status))+'</td><td>'+(t.duration_s!=null?t.duration_s+'s':'—')+'</td><td>'+(t.exit_code!=null?t.exit_code:'—')+'</td><td class="result-preview" title="'+esc(t.result||'')+'">'+esc((t.result||'').slice(0,100))+'</td>'+(t.doc_url?'<td><a href="'+esc(t.doc_url)+'" target="_blank" style="color:var(--accent)">📄</a></td>':'<td>—</td>')+'</tr>').join('');
 }
 async function refresh(){try{const r=await apiFetch(API);if(!r.ok){throw new Error('Failed to load tasks')}render(await r.json())}catch(e){console.error(e)}}
 refresh();setInterval(refresh,3000);
@@ -772,6 +811,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <h1 id="title">Task Detail</h1>
 </div>
 <div class="info" id="info"></div>
+<div id="confirmPanel" style="display:none;padding:12px 24px;display:flex;gap:8px">
+<button onclick="confirmTask()" style="background:var(--green);color:#000;border:none;padding:8px 20px;border-radius:6px;cursor:pointer;font-weight:600">✅ 确认执行</button>
+<button onclick="rejectTask()" style="background:var(--red);color:#fff;border:none;padding:8px 20px;border-radius:6px;cursor:pointer;font-weight:600">❌ 拒绝</button>
+</div>
+<div id="planSection" style="display:none;padding:12px 24px">
+<h3 style="color:var(--text2);margin-bottom:8px">📋 开发规划</h3>
+<pre id="planContent" style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;font-size:13px;line-height:1.6;max-height:300px;overflow-y:auto"></pre>
+</div>
 <div class="split">
 <div class="logs" id="logs"><div style="color:var(--text2);text-align:center;padding:40px">Loading logs...</div></div>
 <div class="cmd-panel">
@@ -790,7 +837,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 <script>
 const TASK_ID=decodeURIComponent(location.pathname.slice('/task/'.length));const SESSION_KEY='hermes_web_session';let sessionPromise=null;
-const STATUS_CLASS={pending:'pending',running:'running',retrying:'retrying',done:'done',failed:'failed'};
+const STATUS_CLASS={pending:'pending',running:'running',retrying:'retrying',done:'done',failed:'failed',planning:'planning',awaiting_confirmation:'awaiting'};
 const esc=s=>{const d=document.createElement('div');d.textContent=s||'';return d.innerHTML};
 async function loginWithPrompt(){
 const apiKey=window.prompt('Enter Hermes API key');
@@ -837,8 +884,14 @@ document.getElementById('info').innerHTML=[
 ['Agent','<span style="background:rgba(88,166,255,.1);color:var(--accent);padding:2px 6px;border-radius:4px">'+esc(t.agent)+'</span>'],
 ['Status',statusBadge(t.status)],
 ['Created',esc(t.created_at)],['Started',esc(t.started_at||'—')],
-['Description',esc(t.description)],['Model',esc(t.model||'—')]
+['Description',esc(t.description)],['Model',esc(t.model||'')],
+...(t.doc_url?[['📄 文档','<a href="'+esc(t.doc_url)+'" target="_blank" style="color:var(--accent)">'+esc(t.doc_url)+'</a>']]:[])
 ].map(([l,v])=>'<div class="info-card"><div class="label">'+l+'</div><div class="value">'+v+'</div></div>').join('');
+// Show plan section if available
+if(t.plan){document.getElementById('planSection').style.display='block';document.getElementById('planContent').textContent=t.plan}
+// Show confirm/reject buttons if awaiting
+if(t.status==='awaiting_confirmation'){document.getElementById('confirmPanel').style.display='flex'}
+else{document.getElementById('confirmPanel').style.display='none'}
 }
 async function loadLogs(){
 const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID));if(!r.ok){throw new Error('Failed to load logs')}const data=await r.json();
@@ -867,6 +920,8 @@ async function quickCmd(cmd){
 const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID)+'/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})});
 if(r.ok){loadCmds()}
 }
+async function confirmTask(){const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID)+'/confirm',{method:'POST'});if(r.ok){alert('Task confirmed!');location.reload()}else{const d=await r.json();alert(d.detail||'Confirm failed')}}
+async function rejectTask(){if(!confirm('确定拒绝此任务？'))return;const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID)+'/reject',{method:'POST'});if(r.ok){alert('Task rejected');location.reload()}else{const d=await r.json();alert(d.detail||'Reject failed')}}
 loadTask();loadLogs();loadCmds();
 setInterval(()=>{loadLogs();loadCmds()},3000);
 setInterval(loadTask,5000);

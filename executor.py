@@ -46,15 +46,21 @@ class TaskExecutor:
         self.exec_log = ExecutionLog(self.registry)
         self.cmd_queue = CommandQueue(self.registry)
 
-    def submit(self, description: str, override: str | None = None) -> dict:
-        """Submit a new task and block until it completes.
+    def submit(self, description: str, override: str | None = None, skip_plan: bool = False, _notify: bool = True) -> dict:
+        """Submit a new task: plan → create doc → notify → await confirmation.
+
+        This is the new non-blocking flow. After calling submit(), the task
+        will be in 'awaiting_confirmation' status. Call confirm_and_execute()
+        to proceed with development.
 
         Args:
             description: Natural-language task description.
             override: If set to 'claude-code' or 'codex', skip routing.
+            skip_plan: If True, skip planning phase (backward compatible).
+            _notify: If False, suppress plan-ready notification (internal use).
 
         Returns:
-            Complete task dict after execution finishes.
+            Task dict in 'awaiting_confirmation' status (or 'pending' if skip_plan).
         """
         # 1. Generate task_id
         slug = _slugify(description)[:30]
@@ -71,7 +77,7 @@ class TaskExecutor:
             task_id, agent, decision.model, description,
         )
 
-        # 3. Create task in registry
+        # 3. Create task in registry (status=planning)
         task = self.registry.create_task(
             task_id=task_id,
             description=description,
@@ -79,23 +85,158 @@ class TaskExecutor:
             branch=branch,
             model=decision.model,
         )
+        self.registry.transition_status(task_id, "planning", "pending")
         self.exec_log.append(task_id, f"Task submitted: agent={agent} model={decision.model}", source="system")
 
-        # 4. Execute (blocking)
-        task = self.execute(task_id)
+        # 4. Generate plan (or skip)
+        if not skip_plan:
+            self.exec_log.append(task_id, "Generating development plan...", source="system")
+            try:
+                from planner import generate_plan
+                plan_result = generate_plan(description)
+                if plan_result.success:
+                    self.registry.set_plan(task_id, plan_result.plan)
+                    self.exec_log.append(
+                        task_id, f"Plan generated ({len(plan_result.plan)} chars)", source="system"
+                    )
+                else:
+                    self.exec_log.append(
+                        task_id, f"Plan generation failed: {plan_result.error}", source="system", level="warn"
+                    )
+                    # Continue without plan — don't block
+            except Exception as e:
+                self.exec_log.append(
+                    task_id, f"Plan generation error: {e}", source="system", level="error"
+                )
 
-        # 5. Send notification
+        # 5. Create Feishu document
+        task = self.registry.get_task(task_id)
+        plan_text = task.get("plan", "") or "（未生成规划，直接执行）"
+        try:
+            from doc_writer import create_task_doc
+            doc_info = create_task_doc(task_id, description, plan_text)
+            self.registry.set_doc_url(task_id, doc_info["url"])
+            self.exec_log.append(task_id, f"Feishu doc created: {doc_info['url']}", source="system")
+        except Exception as e:
+            self.exec_log.append(
+                task_id, f"Doc creation skipped: {e}", source="system", level="warn"
+            )
+
+        # 6. Transition to awaiting_confirmation
+        self.registry.transition_status(task_id, "awaiting_confirmation", "planning")
+
+        # 7. Notify user (skip for legacy submit_and_execute)
+        if _notify:
+            task = self.registry.get_task(task_id)
+            doc_url = task.get("doc_url", "")
+            plan_summary = (task.get("plan", "") or "")[:200]
+            self.outbox.send_notification(
+                task_id,
+                "notify_plan_ready",
+                {
+                    "message": f"📋 任务 {task_id} 的开发规划已生成，请确认后执行。",
+                    "doc_url": doc_url,
+                    "plan_summary": plan_summary,
+                    "task_id": task_id,
+                    "agent": agent,
+                },
+            )
+
+        return self.registry.get_task(task_id)
+
+    def submit_and_execute(self, description: str, override: str | None = None) -> dict:
+        """Legacy submit: plan + execute in one blocking call (backward compatible).
+
+        Args:
+            description: Natural-language task description.
+            override: If set to 'claude-code' or 'codex', skip routing.
+
+        Returns:
+            Complete task dict after execution finishes.
+        """
+        # Use new submit with skip_plan for backward compat
+        task = self.submit(description, override, skip_plan=True, _notify=False)
+        # submit() leaves task in awaiting_confirmation; skip straight to pending
+        self.registry.transition_status(task["id"], "pending", "awaiting_confirmation")
+        task = self.execute(task["id"])
+
         if task["status"] == "done":
+            self.outbox.send_notification(
+                task["id"],
+                "notify_done",
+                {"message": f"Task {task['id']} completed successfully"},
+            )
+        else:
+            self.outbox.send_notification(
+                task["id"],
+                "notify_failed",
+                {"message": f"Task {task['id']} failed: {task.get('stderr_tail', 'unknown')}"}
+            )
+
+        return self.registry.get_task(task["id"])
+
+    def confirm_and_execute(self, task_id: str) -> dict:
+        """Confirm a task and execute development.
+
+        Args:
+            task_id: Task identifier in 'awaiting_confirmation' status.
+
+        Returns:
+            Task dict after execution finishes.
+        """
+        task = self.registry.get_task(task_id)
+        if task is None:
+            raise ValueError(f"Task {task_id} not found")
+        if task["status"] != "awaiting_confirmation":
+            raise ValueError(
+                f"Task {task_id} is in status '{task['status']}', expected 'awaiting_confirmation'"
+            )
+
+        # Confirm → pending
+        self.registry.confirm_task(task_id)
+        self.exec_log.append(task_id, "Task confirmed by user, starting execution...", source="system")
+        self.outbox.send_notification(
+            task_id,
+            "notify_confirmed",
+            {"message": f"✅ 任务 {task_id} 已确认，开始执行。"},
+        )
+
+        # Write start log to doc
+        doc_url = task.get("doc_url", "")
+        if doc_url:
+            try:
+                from doc_writer import append_log
+                append_log(task_id, "✅ 用户已确认，开始执行开发...")
+            except Exception:
+                pass
+
+        # Execute
+        result = self.execute(task_id)
+
+        # Write completion to doc
+        if doc_url:
+            try:
+                from doc_writer import append_log
+                if result["status"] == "done":
+                    append_log(task_id, f"🎉 任务完成！exit_code=0")
+                else:
+                    append_log(task_id, f"❌ 任务失败: {result.get('stderr_tail', 'unknown')}")
+            except Exception:
+                pass
+
+        # Notify
+        if result["status"] == "done":
             self.outbox.send_notification(
                 task_id,
                 "notify_done",
-                {"message": f"Task {task_id} completed successfully"},
+                {"message": f"Task {task_id} completed successfully", "doc_url": doc_url},
             )
         else:
             self.outbox.send_notification(
                 task_id,
                 "notify_failed",
-                {"message": f"Task {task_id} failed: {task.get('stderr_tail', 'unknown')}"}
+                {"message": f"Task {task_id} failed: {result.get('stderr_tail', 'unknown')}",
+                 "doc_url": doc_url},
             )
 
         return self.registry.get_task(task_id)

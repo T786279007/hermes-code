@@ -113,6 +113,7 @@ class TaskRegistry:
             self._ensure_done_checks_column(conn)
             self._ensure_progress_log_column(conn)
             self._ensure_web_columns(conn)
+            self._ensure_plan_columns(conn)
             self._ensure_log_indexes(conn)
         logger.info("TaskRegistry initialized at %s", self._db_path)
 
@@ -366,6 +367,79 @@ class TaskRegistry:
                 logger.info("Added %s column to tasks table", col_name)
             except sqlite3.OperationalError:
                 pass  # Column already exists
+
+    def _ensure_plan_columns(self, conn: sqlite3.Connection) -> None:
+        """Add plan-related columns to tasks table (auto-migration).
+
+        Args:
+            conn: SQLite connection.
+        """
+        for col in ("plan TEXT", "doc_url TEXT", "confirmed_at TIMESTAMP"):
+            col_name = col.split()[0]
+            try:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {col};")
+                logger.info("Added %s column to tasks table", col_name)
+            except sqlite3.OperationalError:
+                pass  # Column already exists
+
+    def set_plan(self, task_id: str, plan: str) -> bool:
+        """Set the development plan for a task.
+
+        Args:
+            task_id: Unique task identifier.
+            plan: Plan text.
+
+        Returns:
+            True if update succeeded.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE tasks SET plan = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (plan, task_id),
+            )
+            return cursor.rowcount > 0
+
+    def set_doc_url(self, task_id: str, url: str) -> bool:
+        """Set the Feishu document URL for a task.
+
+        Args:
+            task_id: Unique task identifier.
+            url: Document URL.
+
+        Returns:
+            True if update succeeded.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE tasks SET doc_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (url, task_id),
+            )
+            return cursor.rowcount > 0
+
+    def confirm_task(self, task_id: str) -> bool:
+        """Confirm a task and transition to pending for execution.
+
+        Args:
+            task_id: Unique task identifier.
+
+        Returns:
+            True if confirmation succeeded.
+        """
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM tasks WHERE id = ?;", (task_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            if row["status"] != "awaiting_confirmation":
+                logger.warning("Task %s is in status %s, not awaiting_confirmation", task_id, row["status"])
+                return False
+            conn.execute(
+                "UPDATE tasks SET status = 'pending', confirmed_at = CURRENT_TIMESTAMP, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?;",
+                (task_id,),
+            )
+            return True
 
     def _ensure_log_indexes(self, conn: sqlite3.Connection) -> None:
         """Create indexes on execution_logs if they don't exist.
