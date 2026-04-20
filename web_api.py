@@ -17,16 +17,13 @@ import logging
 import os
 import secrets
 import sqlite3
-import time
-import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Header, Depends
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from config import DB_PATH as _DB_PATH, REPO_PATH, WORKTREE_BASE
@@ -37,10 +34,24 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 DB_PATH = str(_DB_PATH)
-API_KEY = os.environ.get("HERMES_API_KEY", "hermes-web-default-key-2026")
 SESSION_TTL_HOURS = 24
 SSE_HEARTBEAT_S = 15
 POLL_INTERVAL_S = 1
+
+
+def _load_api_key() -> tuple[str, bool]:
+    """Load the configured API key or generate an ephemeral one."""
+    configured = os.environ.get("HERMES_API_KEY")
+    if configured:
+        return configured, False
+    generated = secrets.token_urlsafe(32)
+    logger.warning(
+        "HERMES_API_KEY is not set; generated an ephemeral API key for this process only"
+    )
+    return generated, True
+
+
+API_KEY, API_KEY_IS_EPHEMERAL = _load_api_key()
 
 # ---------------------------------------------------------------------------
 # Data models (Pydantic)
@@ -53,7 +64,7 @@ class TaskSubmitRequest(BaseModel):
 
 
 class CommandRequest(BaseModel):
-    command: str = Field(..., description="Command type: cancel, inject, priority, retry")
+    command: str = Field(..., description="Command type: cancel, inject, priority, retry, pause, resume")
     payload: Optional[dict] = Field(None, description="Command payload")
 
 
@@ -105,7 +116,7 @@ def _get_task_logs(task_id: str, since_id: int | None = None, limit: int = 200) 
     """Get execution logs for a task."""
     conn = _get_db()
     try:
-        if since_id:
+        if since_id is not None:
             rows = conn.execute(
                 "SELECT * FROM execution_logs WHERE task_id = ? AND id > ? ORDER BY id ASC LIMIT ?;",
                 (task_id, since_id, limit),
@@ -177,6 +188,77 @@ def _get_uptime() -> str:
         return "unknown"
 
 
+def _parse_timestamp(value: object) -> datetime | None:
+    """Parse a DB timestamp into a timezone-aware datetime."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(float(value), tz=timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
+
+
+def _serialize_task(task: dict) -> dict:
+    """Augment a task row with UI-friendly derived fields."""
+    result = dict(task)
+    created_at = _parse_timestamp(result.get("created_at"))
+    started_at = _parse_timestamp(result.get("started_at")) or created_at
+    updated_at = _parse_timestamp(result.get("updated_at"))
+
+    duration_s: int | None = None
+    if result.get("status") == "running" and started_at is not None:
+        duration_s = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))
+    elif updated_at is not None and started_at is not None:
+        duration_s = max(0, int((updated_at - started_at).total_seconds()))
+
+    result["duration_s"] = duration_s
+    return result
+
+
+def _run_task_and_notify(task_id: str) -> None:
+    """Execute a submitted task in the background and send completion notification."""
+    from executor import TaskExecutor
+    from outbox import Outbox
+    from reconciler import Reconciler
+    from router import TaskRouter
+    from task_registry import TaskRegistry
+
+    registry = TaskRegistry(DB_PATH)
+    outbox = Outbox(registry)
+    executor = TaskExecutor(registry, TaskRouter(), outbox, Reconciler(registry))
+
+    try:
+        task = executor.execute(task_id)
+        if task["status"] == "done":
+            outbox.send_notification(
+                task_id,
+                "notify_done",
+                {"message": f"Task {task_id} completed successfully"},
+            )
+        else:
+            outbox.send_notification(
+                task_id,
+                "notify_failed",
+                {"message": f"Task {task_id} failed: {task.get('stderr_tail', 'unknown')}"},
+            )
+    except Exception:
+        logger.exception("Background execution failed for task %s", task_id)
+
+
 # ---------------------------------------------------------------------------
 # Session management
 # ---------------------------------------------------------------------------
@@ -184,8 +266,17 @@ def _get_uptime() -> str:
 _sessions: dict[str, dict] = {}  # session_id -> {api_key, created_at, expires_at}
 
 
+def _purge_expired_sessions() -> None:
+    """Drop expired in-memory sessions."""
+    now = datetime.now(timezone.utc)
+    expired = [session_id for session_id, session in _sessions.items() if now > session["expires_at"]]
+    for session_id in expired:
+        del _sessions[session_id]
+
+
 def _verify_session(session_id: str) -> bool:
     """Verify a session is valid."""
+    _purge_expired_sessions()
     if session_id not in _sessions:
         return False
     session = _sessions[session_id]
@@ -199,6 +290,8 @@ def _verify_session(session_id: str) -> bool:
 def _create_session(api_key: str) -> str:
     """Create a new session."""
     from datetime import timedelta
+
+    _purge_expired_sessions()
     session_id = secrets.token_urlsafe(32)
     now = datetime.now(timezone.utc)
     _sessions[session_id] = {
@@ -223,10 +316,10 @@ async def _auth(
         return
     # Try Bearer token / API key
     if authorization:
-        token = authorization.replace("Bearer ", "").strip()
+        token = authorization.removeprefix("Bearer ").strip()
         if token in _sessions and _verify_session(token):
             return
-        if token == API_KEY:
+        if token and secrets.compare_digest(token, API_KEY):
             return
     raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -296,13 +389,20 @@ async def _lifespan(app: FastAPI):
 
 app = FastAPI(title="Hermes Web API", version="1.0.0", lifespan=_lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.environ.get("HERMES_WEB_CORS_ORIGINS", "").split(",")
+    if origin.strip()
+]
+if _CORS_ORIGINS:
+    allow_credentials = "*" not in _CORS_ORIGINS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_CORS_ORIGINS,
+        allow_credentials=allow_credentials,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type", "X-Session"],
+    )
 
 
 # --- Auth ---
@@ -336,7 +436,7 @@ async def list_tasks(
     """List tasks with optional filtering."""
     tasks = _get_tasks(status=status, limit=limit, offset=offset)
     stats = _get_stats()
-    return {"tasks": tasks, "stats": stats}
+    return {"tasks": [_serialize_task(task) for task in tasks], "stats": stats}
 
 
 @app.get("/api/tasks/{task_id}")
@@ -346,20 +446,26 @@ async def get_task(task_id: str, _: None = Depends(_auth)):
     if not task:
         raise HTTPException(status_code=404, detail=f"Task '{task_id}' not found")
     logs = _get_task_logs(task_id, limit=200)
-    return {"task": task, "logs": logs}
+    return {"task": _serialize_task(task), "logs": logs}
 
 
 @app.post("/api/tasks")
-async def submit_task(req: TaskSubmitRequest, _: None = Depends(_auth)):
+async def submit_task(
+    req: TaskSubmitRequest,
+    background_tasks: BackgroundTasks,
+    _: None = Depends(_auth),
+):
     """Submit a new task."""
     # Import here to avoid circular deps
+    from execution_log import ExecutionLog
     from task_registry import TaskRegistry
     from router import TaskRouter
 
     registry = TaskRegistry(DB_PATH)
     router = TaskRouter()
 
-    agent = req.agent if req.agent in ("claude-code", "codex") else router.route(req.description)
+    override = req.agent if req.agent in ("claude-code", "codex") else None
+    decision = router.route(req.description, override)
     slug = _slugify(req.description)[:30]
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     task_id = f"feat-{slug}-{ts}"
@@ -367,10 +473,18 @@ async def submit_task(req: TaskSubmitRequest, _: None = Depends(_auth)):
     task = registry.create_task(
         task_id=task_id,
         description=req.description,
-        agent=agent,
+        agent=decision.agent,
+        branch=f"hermes/{task_id}",
+        model=decision.model,
     )
-    logger.info("Task submitted via web: %s (agent=%s)", task_id, agent)
-    return {"task": task, "message": "Task submitted successfully"}
+    ExecutionLog(registry).append(
+        task_id,
+        f"Task submitted via web: agent={decision.agent} model={decision.model}",
+        source="system",
+    )
+    background_tasks.add_task(_run_task_and_notify, task_id)
+    logger.info("Task submitted via web: %s (agent=%s)", task_id, decision.agent)
+    return {"task": _serialize_task(task), "message": "Task submitted successfully"}
 
 
 # --- Commands ---
@@ -549,9 +663,46 @@ tr:hover{background:rgba(255,255,255,.02)}
 </div>
 <div id="empty" style="display:none;text-align:center;padding:60px;color:var(--text2)">No tasks found</div>
 <script>
-const API='/api/tasks';let currentFilter='';
+const API='/api/tasks';let currentFilter='';const SESSION_KEY='hermes_web_session';let sessionPromise=null;
+const STATUS_CLASS={pending:'pending',running:'running',retrying:'retrying',done:'done',failed:'failed'};
 function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML}
-function statusBadge(s){return '<span class="badge '+s+'">'+s+'</span>'}
+async function loginWithPrompt(){
+const apiKey=window.prompt('Enter Hermes API key');
+if(!apiKey){throw new Error('API key is required')}
+const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:apiKey})});
+const data=await r.json();
+if(!r.ok){throw new Error(data.detail||'Login failed')}
+localStorage.setItem(SESSION_KEY,data.session_id);
+return data.session_id;
+}
+async function ensureSession(forcePrompt=false){
+if(sessionPromise){return sessionPromise}
+sessionPromise=(async()=>{
+if(!forcePrompt){
+const cached=localStorage.getItem(SESSION_KEY);
+if(cached){
+const verify=await fetch('/api/auth/verify',{headers:{'x-session':cached}});
+if(verify.ok){return cached}
+localStorage.removeItem(SESSION_KEY);
+}
+}
+return loginWithPrompt();
+})();
+try{return await sessionPromise}finally{sessionPromise=null}
+}
+async function apiFetch(url,options={},retry=true){
+const session=await ensureSession(false);
+const headers=new Headers(options.headers||{});
+headers.set('x-session',session);
+const response=await fetch(url,{...options,headers});
+if(response.status===401&&retry){
+localStorage.removeItem(SESSION_KEY);
+return apiFetch(url,options,false);
+}
+return response;
+}
+function statusBadge(s){const cls=STATUS_CLASS[s]||'pending';return '<span class="badge '+cls+'">'+esc(s||'unknown')+'</span>'}
+function taskHref(id){return '/task/'+encodeURIComponent(id||'')}
 function render(data){
 const{tasks,stats}=data;
 document.getElementById('ts').textContent=new Date().toLocaleString('zh-CN');
@@ -562,9 +713,9 @@ const tbody=document.getElementById('tbody');const empty=document.getElementById
 const filtered=currentFilter?tasks.filter(t=>t.status===currentFilter):tasks;
 if(!filtered.length){tbody.innerHTML='';empty.style.display='block';return}
 empty.style.display='none';
-tbody.innerHTML=filtered.map(t=>'<tr><td class="task-id" onclick="location.href=\'/task/'+esc(t.id)+'\'" title="'+esc(t.id)+'">'+esc(t.id.length>30?t.id.slice(0,30)+'…':t.id)+'</td><td><span class="agent-tag">'+esc(t.agent)+'</span></td><td>'+(t.status==='running'?'<span class="pulse">'+statusBadge(t.status)+'</span>':statusBadge(t.status))+'</td><td>'+(t.duration_s!=null?t.duration_s+'s':'—')+'</td><td>'+(t.exit_code!=null?t.exit_code:'—')+'</td><td class="result-preview" title="'+esc(t.result||'')+'">'+esc((t.result||'').slice(0,100))+'</td><td style="white-space:nowrap;color:var(--text2)">'+esc(t.created_at)+'</td></tr>').join('');
+tbody.innerHTML=filtered.map(t=>'<tr><td><a class="task-id" href="'+taskHref(t.id)+'" title="'+esc(t.id)+'">'+esc(t.id.length>30?t.id.slice(0,30)+'…':t.id)+'</a></td><td><span class="agent-tag">'+esc(t.agent)+'</span></td><td>'+(t.status==='running'?'<span class="pulse">'+statusBadge(t.status)+'</span>':statusBadge(t.status))+'</td><td>'+(t.duration_s!=null?t.duration_s+'s':'—')+'</td><td>'+(t.exit_code!=null?t.exit_code:'—')+'</td><td class="result-preview" title="'+esc(t.result||'')+'">'+esc((t.result||'').slice(0,100))+'</td><td style="white-space:nowrap;color:var(--text2)">'+esc(t.created_at)+'</td></tr>').join('');
 }
-async function refresh(){try{const r=await fetch(API);render(await r.json())}catch(e){console.error(e)}}
+async function refresh(){try{const r=await apiFetch(API);if(!r.ok){throw new Error('Failed to load tasks')}render(await r.json())}catch(e){console.error(e)}}
 refresh();setInterval(refresh,3000);
 document.getElementById('filters').addEventListener('click',e=>{if(e.target.tagName==='BUTTON'){document.querySelectorAll('.filters button').forEach(b=>b.classList.remove('active'));e.target.classList.add('active');currentFilter=e.target.dataset.status;refresh()}});
 </script>
@@ -588,6 +739,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .info-card .value{font-size:16px;font-weight:600;margin-top:4px;word-break:break-all}
 .split{display:grid;grid-template-columns:1fr 360px;gap:0;height:calc(100vh - 200px)}
 .logs{padding:16px 24px;overflow-y:auto;font-family:'SF Mono',Monaco,Consolas,monospace;font-size:13px;line-height:1.6}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600}
+.badge.done{background:rgba(63,185,80,.15);color:var(--green)}.badge.failed{background:rgba(248,81,73,.15);color:var(--red)}
+.badge.running{background:rgba(88,166,255,.15);color:var(--accent)}.badge.retrying{background:rgba(210,153,34,.15);color:var(--yellow)}
+.badge.pending{background:rgba(139,148,158,.15);color:var(--text2)}
 .log-line{padding:2px 0;border-bottom:1px solid rgba(255,255,255,.03)}
 .log-line .ts{color:var(--text2);margin-right:8px}
 .log-line .level{margin-right:8px;font-weight:600}
@@ -608,6 +763,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .cmd-item .cmd-status.pending{color:var(--yellow)}.cmd-item .cmd-status.delivered{color:var(--accent)}
 .cmd-item .cmd-status.executed{color:var(--green)}.cmd-item .cmd-status.expired{color:var(--text2)}
 .cmd-item .cmd-payload{color:var(--text2);margin-top:4px}
+.cmd-item .cmd-result{color:var(--text);margin-top:4px;white-space:pre-wrap}
 </style>
 </head>
 <body>
@@ -633,23 +789,59 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 </div>
 </div>
 <script>
-const TASK_ID=location.pathname.split('/task/')[1];
+const TASK_ID=decodeURIComponent(location.pathname.slice('/task/'.length));const SESSION_KEY='hermes_web_session';let sessionPromise=null;
+const STATUS_CLASS={pending:'pending',running:'running',retrying:'retrying',done:'done',failed:'failed'};
 const esc=s=>{const d=document.createElement('div');d.textContent=s||'';return d.innerHTML};
+async function loginWithPrompt(){
+const apiKey=window.prompt('Enter Hermes API key');
+if(!apiKey){throw new Error('API key is required')}
+const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:apiKey})});
+const data=await r.json();
+if(!r.ok){throw new Error(data.detail||'Login failed')}
+localStorage.setItem(SESSION_KEY,data.session_id);
+return data.session_id;
+}
+async function ensureSession(forcePrompt=false){
+if(sessionPromise){return sessionPromise}
+sessionPromise=(async()=>{
+if(!forcePrompt){
+const cached=localStorage.getItem(SESSION_KEY);
+if(cached){
+const verify=await fetch('/api/auth/verify',{headers:{'x-session':cached}});
+if(verify.ok){return cached}
+localStorage.removeItem(SESSION_KEY);
+}
+}
+return loginWithPrompt();
+})();
+try{return await sessionPromise}finally{sessionPromise=null}
+}
+async function apiFetch(url,options={},retry=true){
+const session=await ensureSession(false);
+const headers=new Headers(options.headers||{});
+headers.set('x-session',session);
+const response=await fetch(url,{...options,headers});
+if(response.status===401&&retry){
+localStorage.removeItem(SESSION_KEY);
+return apiFetch(url,options,false);
+}
+return response;
+}
+function statusBadge(status){const cls=STATUS_CLASS[status]||'pending';return '<span class="badge '+cls+'">'+esc(status||'unknown')+'</span>'}
 async function loadTask(){
-const r=await fetch('/api/tasks/'+TASK_ID);const data=await r.json();
+const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID));if(!r.ok){throw new Error('Failed to load task')}const data=await r.json();
 const t=data.task;
-document.getElementById('title').textContent='Task: '+esc(t.id);
-const status=t.status;
+document.getElementById('title').textContent='Task: '+(t.id||TASK_ID);
 document.getElementById('info').innerHTML=[
 ['ID','<span style="font-family:monospace;font-size:12px">'+esc(t.id)+'</span>'],
 ['Agent','<span style="background:rgba(88,166,255,.1);color:var(--accent);padding:2px 6px;border-radius:4px">'+esc(t.agent)+'</span>'],
-['Status','<span class="badge '+status+'">'+status+'</span>'],
+['Status',statusBadge(t.status)],
 ['Created',esc(t.created_at)],['Started',esc(t.started_at||'—')],
 ['Description',esc(t.description)],['Model',esc(t.model||'—')]
 ].map(([l,v])=>'<div class="info-card"><div class="label">'+l+'</div><div class="value">'+v+'</div></div>').join('');
 }
 async function loadLogs(){
-const r=await fetch('/api/tasks/'+TASK_ID);const data=await r.json();
+const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID));if(!r.ok){throw new Error('Failed to load logs')}const data=await r.json();
 const logs=data.logs||[];
 const el=document.getElementById('logs');
 if(!logs.length){el.innerHTML='<div style="color:var(--text2);text-align:center;padding:40px">No logs yet</div>';return}
@@ -657,21 +849,23 @@ el.innerHTML=logs.map(l=>'<div class="log-line"><span class="ts">'+esc(l.created
 el.scrollTop=el.scrollHeight;
 }
 async function loadCmds(){
-const r=await fetch('/api/tasks/'+TASK_ID+'/commands');const data=await r.json();
+const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID)+'/commands');if(!r.ok){throw new Error('Failed to load commands')}const data=await r.json();
 const cmds=data.commands||[];
 const el=document.getElementById('cmdHistory');
 if(!cmds.length){el.innerHTML='<div style="color:var(--text2);font-size:12px">No commands</div>';return}
-el.innerHTML=cmds.map(c=>'<div class="cmd-item"><span class="cmd-type">'+esc(c.command)+'</span><span class="cmd-status '+esc(c.status)+'">'+esc(c.status)+'</span>'+(c.payload?'<div class="cmd-payload">'+esc(c.payload)+'</div>':'')+'</div>').join('');
+el.innerHTML=cmds.map(c=>'<div class="cmd-item"><span class="cmd-type">'+esc(c.command)+'</span><span class="cmd-status '+esc(STATUS_CLASS[c.status]||'pending')+'">'+esc(c.status)+'</span>'+(c.payload?'<div class="cmd-payload">'+esc(c.payload)+'</div>':'')+(c.result?'<div class="cmd-result">'+esc(c.result)+'</div>':'')+'</div>').join('');
 }
 async function sendCmd(){
 const payload=document.getElementById('cmdPayload').value.trim();
 if(!payload)return;
-try{let parsed=JSON.parse(payload)}catch{parsed={text:payload}}
-const r=await fetch('/api/tasks/'+TASK_ID+'/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'inject',payload:parsed})});
+let parsed;
+try{parsed=JSON.parse(payload)}catch{parsed={text:payload}}
+const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID)+'/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:'inject',payload:parsed})});
 if(r.ok){document.getElementById('cmdPayload').value='';loadCmds()}
 }
-function quickCmd(cmd){
-fetch('/api/tasks/'+TASK_ID+'/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})}).then(()=>loadCmds());
+async function quickCmd(cmd){
+const r=await apiFetch('/api/tasks/'+encodeURIComponent(TASK_ID)+'/commands',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:cmd})});
+if(r.ok){loadCmds()}
 }
 loadTask();loadLogs();loadCmds();
 setInterval(()=>{loadLogs();loadCmds()},3000);
@@ -686,7 +880,7 @@ _SUBMIT_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Hermes - Submit Task</title>
 <style>
-:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950}
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#e6edf3;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149}
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;justify-content:center;align-items:flex-start;padding:60px 20px}
 .form{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:32px;width:100%;max-width:600px}
@@ -720,13 +914,49 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 <div class="result" id="result"></div>
 </div>
 <script>
+const SESSION_KEY='hermes_web_session';let sessionPromise=null;
+async function loginWithPrompt(){
+const apiKey=window.prompt('Enter Hermes API key');
+if(!apiKey){throw new Error('API key is required')}
+const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({api_key:apiKey})});
+const data=await r.json();
+if(!r.ok){throw new Error(data.detail||'Login failed')}
+localStorage.setItem(SESSION_KEY,data.session_id);
+return data.session_id;
+}
+async function ensureSession(forcePrompt=false){
+if(sessionPromise){return sessionPromise}
+sessionPromise=(async()=>{
+if(!forcePrompt){
+const cached=localStorage.getItem(SESSION_KEY);
+if(cached){
+const verify=await fetch('/api/auth/verify',{headers:{'x-session':cached}});
+if(verify.ok){return cached}
+localStorage.removeItem(SESSION_KEY);
+}
+}
+return loginWithPrompt();
+})();
+try{return await sessionPromise}finally{sessionPromise=null}
+}
+async function apiFetch(url,options={},retry=true){
+const session=await ensureSession(false);
+const headers=new Headers(options.headers||{});
+headers.set('x-session',session);
+const response=await fetch(url,{...options,headers});
+if(response.status===401&&retry){
+localStorage.removeItem(SESSION_KEY);
+return apiFetch(url,options,false);
+}
+return response;
+}
 async function submit(){
 const desc=document.getElementById('desc').value.trim();
 const agent=document.getElementById('agent').value;
 if(!desc){showResult('Please enter a task description','error');return}
 const btn=document.getElementById('submitBtn');btn.disabled=true;btn.textContent='Submitting...';
 try{
-const r=await fetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:desc,agent:agent})});
+const r=await apiFetch('/api/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({description:desc,agent:agent})});
 const data=await r.json();
 if(r.ok){showResult('Task submitted: '+data.task.id,'success');setTimeout(()=>location.href='/task/'+data.task.id,1500)}
 else{showResult(data.detail||'Submit failed','error')}
@@ -760,5 +990,8 @@ if __name__ == "__main__":
 
     print(f"🦞 Hermes Web API running at http://{args.host}:{args.port}")
     print(f"   DB: {DB_PATH}")
-    print(f"   API Key: {API_KEY[:8]}...")
+    if API_KEY_IS_EPHEMERAL:
+        print(f"   API Key (ephemeral): {API_KEY}")
+    else:
+        print(f"   API Key: {API_KEY[:8]}...")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
